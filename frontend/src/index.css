@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* ─── F1 Team Colors ─────────────────────────────────────────────────── */
+:root {
+  /* Constructor palette */
+  --color-redbull:      #3671C6;
+  --color-ferrari:      #E8002D;
+  --color-mercedes:     #27F4D2;
+  --color-mclaren:      #FF8000;
+  --color-aston:        #229971;
+  --color-alpine:       #FF87BC;
+  --color-williams:     #64C4FF;
+  --color-haas:         #B6BABD;
+  --color-rb:           #6692FF;
+  --color-sauber:       #52E252;
+
+  /* UI surface tokens */
+  --bg-base:            #0a0a0f;
+  --bg-surface:         #12121a;
+  --bg-elevated:        #1a1a26;
+  --bg-card:            #1e1e2e;
+
+  /* Text */
+  --text-primary:       #f0f0f5;
+  --text-secondary:     #8888aa;
+  --text-muted:         #55556a;
+
+  /* Accent — F1 red */
+  --accent:             #E8002D;
+  --accent-hover:       #ff1a40;
+
+  /* Border */
+  --border:             #2a2a3d;
+  --border-subtle:      #1e1e2c;
+
+  /* Tire compounds */
+  --tire-soft:          #E8002D;
+  --tire-medium:        #FFF200;
+  --tire-hard:          #f0f0f5;
+  --tire-inter:         #43B02A;
+  --tire-wet:           #0067FF;
+}
+
+/* ─── Base ────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

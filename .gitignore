@@ -51,6 +51,6 @@ frontend/.env.*
 
 # Docker
 *.override.yml
+frontend/README.md
 CLAUDE.md
-README.md
 ROADMAP.md

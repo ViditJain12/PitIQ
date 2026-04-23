@@ -60,3 +60,28 @@
 **Metrics:** `npm run dev` responds 200 at `:5173`; `tsc --noEmit` clean; 0 ESLint errors on generated files.
 
 **Open questions:** None — Phase 1.1 starts the data pipeline.
+
+---
+
+## Phase 1.1 — FastF1 Client + Cache (2026-04-23)
+**Built:**
+- `backend/src/pitiq/data/client.py` — `load_session(year, race_name, session_type)` wrapping FastF1
+- Persistent disk cache at `data/raw/fastf1_cache/` via `fastf1.Cache.enable_cache()` called on module import (lazy, idempotent)
+- Cache path resolved from `Path(__file__).parents[4]` — works regardless of cwd
+- Retry with exponential backoff: `max_retries=4`, `base_delay=2.0s`, doubles each attempt, capped at 60s
+- Fatal error detection (`ValueError`, `TypeError`, "invalid session" strings) skips retries immediately
+- `load_telemetry=False` default — opt-in for Phase 1.2 which needs it per-driver
+- `backend/tests/test_client.py` — 5 tests: cache dir exists, returns Session, has laps, cache hit speed, invalid session raises
+
+**Worked well:** FastF1's own cache layer handles all the per-endpoint granularity automatically — every data stream (session info, driver list, timing, etc.) is cached individually, so partial fetches are never re-downloaded.
+
+**Pain points:**
+- `Path(__file__).parents` index was off by two on first attempt (used `[6]` instead of `[4]`) — always verify with a quick print before committing path arithmetic.
+- 117 pytest warnings from `url_normalize` deprecation inside FastF1 internals — not our code, harmless, no action needed.
+
+**Metrics:**
+- Cold fetch (2024 Monza R): **5.7s**, 1008 laps, 20 drivers
+- Cache hit (same session): **0.4s** — **14× faster**
+- 5/5 pytest tests green in 2.09s
+
+**Open questions:** None — Phase 1.2 will use `load_telemetry=True` selectively per driver for the telemetry summary columns.

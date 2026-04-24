@@ -145,3 +145,30 @@
 **Null counts on clean dataset:** Only `TyreLife` (887) and `Stint` (382) have any nulls — FastF1 source gaps on specific laps. All other core columns, all 4 telemetry summaries, and both corrected-time columns are fully populated.
 
 **Open questions:** `TyreLife` and `Stint` nulls (~1% of rows each) — may need imputation strategy in Phase 2 feature engineering. Will decide there.
+
+---
+
+## Phase 2.1 — Core Lap Features + Circuit Metadata + Weather (2026-04-23)
+**Built:**
+- `backend/src/pitiq/features/build.py` — `build_features()` pipeline + CLI (`python -m pitiq.features.build`)
+- Per-lap computed features: `tire_age` (=TyreLife), `stint_number` (=Stint), `fuel_load_estimate` (same constants as fuel correction), `laps_remaining` (max LapNumber per race minus current), `position` (=Position)
+- Circuit metadata: hardcoded lookup for all 29 unique EventNames in dataset — `length_km`, `circuit_type` (permanent/street), `pit_loss_s`, `is_street_circuit` (bool)
+- Weather: per-session aggregate from FastF1 weather data — `air_temp`, `track_temp`, `humidity` (session means), `is_wet` (any Rainfall==True)
+- Output: `data/features/lap_features.parquet` — 39 columns, 108,257 rows (no rows lost from laps_all.parquet)
+- `backend/tests/test_features.py` — 14 tests covering schema, ranges, circuit metadata consistency, weather sanity, known wet/dry race checks, fuel formula unit test
+
+**New feature columns:**
+`tire_age`, `stint_number`, `fuel_load_estimate`, `laps_remaining`, `position`, `length_km`, `circuit_type`, `pit_loss_s`, `is_street_circuit`, `air_temp`, `track_temp`, `humidity`, `is_wet`
+
+**Three verification checks passed:**
+1. **Circuit lookup coverage:** 29/29 EventNames matched — zero `length_km` nulls. Australian GP corrected from street → permanent mid-check (Albert Park is semi-permanent, FIA classifies as permanent).
+2. **Position field validity:** 2024 Italian GP spot-check confirmed `position` is dynamic track position, not grid position. Piastri (PIA) led from lap 2 after jumping Leclerc off the line — matches race reality exactly. Position changes through pit windows (PIA→SAI→VER→PER) also verified correct.
+3. **Weather data integrity:** `describe()` on air_temp, track_temp, humidity — no NaNs, no zeros, all ranges within plausible F1 conditions (air: 10.6–36.6°C, track: 16.8–54.5°C, humidity: 7.1–93.5%). Low end matches desert circuits, high end matches Singapore.
+
+**Worked well:** All 113 sessions loaded from cache in ~100s. FastF1's Ergast 429 rate-limit errors during weather loading fell back to cached responses correctly — no data loss, no crashes.
+
+**Known limitations:**
+- `is_wet` is session-level (any rain during the session), not lap-level. A race with a brief shower will flag all laps as wet. **Revisit in Phase 3 if wet-race prediction accuracy is poor** — lap-level `Rainfall` merging by timestamp is possible but adds complexity.
+- **Lap 1 is systematically absent** from the dataset (dropped by `IsAccurate=False` in Phase 1.3). This makes `laps_remaining` off by 1 for every race (reads 51 at Monza instead of 52). Not a modeling concern — consistent across all races — but the `RaceEnv` in Phase 4 should initialise `laps_remaining` from the known total, not from the feature dataset.
+
+**Open questions:** `TyreLife`/`Stint` nulls propagate into `tire_age`/`stint_number` (887 and 382 rows respectively, ~1% each). Imputation strategy TBD in Phase 3 when we see whether XGBoost handles them natively or needs explicit filling.

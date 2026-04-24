@@ -33,6 +33,25 @@
 **Why:** Float seconds is the natural unit for ML features anyway (XGBoost, feature engineering all expect numeric inputs). Keeping them as timedeltas would require conversion at every downstream consumer.
 **Alternatives considered:** Storing as integer nanoseconds (rejected: harder to read and reason about); storing as strings (rejected: lossy and slow to re-parse).
 
+## 2026-04-23 — Hardcoded circuit lookup table (vs. external data source)
+**Context:** Circuit metadata (length, type, pit loss) is needed as ML features but is not available from FastF1 in a structured, reliable format.
+**Decision:** Hardcode a Python dict of 29 circuits with manually researched values.
+**Why:** The alternative — scraping Ergast, Wikipedia, or a third-party F1 API — adds a network dependency to a build step that should be fully reproducible offline. Circuit metadata changes very rarely (maybe once a decade for a new layout). A hardcoded dict is easy to audit, correct, and version-control. All 29 values were verified against known sources.
+**Alternatives considered:** Ergast API circuit data (rejected: adds network dependency, Ergast is being sunset); Wikipedia scraping (rejected: fragile, unversioned); FastF1 circuit info (rejected: doesn't include pit-loss estimates).
+
+## 2026-04-23 — Session-level is_wet flag (vs. lap-level)
+**Context:** Weather data from FastF1 is a time-series with `Rainfall` (bool) sampled every ~60s during the session. Mapping this to individual laps requires a timestamp merge.
+**Decision:** Aggregate to session level: `is_wet = Rainfall.any()` across all weather samples for the session.
+**Why:** Session-level is sufficient for the current XGBoost model — the primary signal is whether the race was wet at all (compound choice, pace deltas). The added complexity of lap-level merging is not worth it unless wet-race accuracy proves poor.
+**Alternatives considered:** Lap-level Rainfall join by timestamp (possible, deferred); per-lap rolling weather window (complex, overkill for now).
+**Revisit trigger:** If Phase 3 XGBoost shows poor MAE on wet-race sessions specifically, upgrade to lap-level merging.
+
+## 2026-04-23 — Australian GP classified as permanent (not street)
+**Context:** Albert Park uses public roads closed for the race weekend, which superficially resembles a street circuit. Initial classification was street.
+**Decision:** Reclassify as permanent.
+**Why:** The FIA officially classifies Albert Park as a semi-permanent circuit, which for strategy and tyre modelling purposes aligns with permanent-circuit behaviour (consistent asphalt, predictable degradation, no sharp barriers limiting overtake). Using street classification would incorrectly inflate pit-loss estimates and misclassify the circuit's degradation profile.
+**Alternatives considered:** Separate "semi-permanent" category (rejected: only one circuit, adds complexity without proportional benefit).
+
 ## 2026-04-22 — Tailwind CSS v4 (not v3)
 **Context:** `npm install tailwindcss` pulled v4.2.4. v4 has a completely different config model — no `tailwind.config.js`, no `postcss.config.js`; uses a Vite plugin instead.
 **Decision:** Stay on v4 with `@tailwindcss/vite` plugin.

@@ -45,6 +45,24 @@
 **Why:** Tailwind v4 config-based theme extension is more complex and less portable; CSS vars are readable, work in inline styles, and will integrate cleanly with Recharts chart colors (which need JS-accessible values anyway).
 **Alternatives considered:** Tailwind `theme.extend.colors` (rejected for v4: extra config complexity); hard-coded hex values (rejected: no single source of truth).
 
+## 2026-04-23 — Fuel correction formula and constants
+**Context:** Lap times in early race laps are artificially slow due to heavy fuel load. Without correction, a lap 1 time and a lap 50 time from the same driver on the same tyre look different even if the underlying pace is identical. The ML model would learn a spurious "lap number effect" instead of tyre degradation.
+**Decision:** `LapTimeCorrected = LapTime − max(0, 110kg − (LapNumber−1) × 1.8kg) × 0.03 s/kg`. Constants: `FUEL_START_KG=110`, `FUEL_BURN_KG_PER_LAP=1.8`, `FUEL_EFFECT_S_PER_KG=0.03`.
+**Why:** 110 kg is the standard FIA maximum fuel load for a race. 1.8 kg/lap is the widely-cited F1 burn rate. 0.03 s/kg is the industry-standard lap-time sensitivity figure used by teams and analysts. These are the same constants used in academic F1 strategy literature (e.g. Heilmeier et al. 2020).
+**Alternatives considered:** Per-circuit, per-season constants derived empirically (better accuracy, but requires the model we haven't built yet — can revisit in Phase 3 if baseline MAE is poor); no fuel correction (rejected: confounds tyre degradation signal with fuel mass effect).
+
+## 2026-04-23 — Drop IsAccurate=False laps as cleaning policy
+**Context:** FastF1 marks laps as `IsAccurate=False` when timing data is incomplete, unreliable, or the lap crossed a session boundary (e.g. VSC, red flag, in/out laps). These laps do not represent true race pace and would add noise to lap time prediction.
+**Decision:** Drop all `IsAccurate=False` laps as the first cleaning step. This removed ~13% of raw laps (16,798 of 125,055).
+**Why:** The XGBoost model is trained to predict competitive race pace. Including non-representative laps would widen prediction error without adding signal. FastF1's `IsAccurate` flag is conservative — it errs toward marking borderline laps as inaccurate, so the false-positive rate is low.
+**Alternatives considered:** Keeping inaccurate laps and adding `IsAccurate` as a feature (rejected: the model should not learn from corrupt data); manual per-lap filtering (rejected: `IsAccurate` captures exactly the right set for our use case).
+
+## 2026-04-23 — Per-season Parquet files + combined laps_all.parquet
+**Context:** Need a storage layout for 5 seasons of lap data that supports both full re-ingestion of a single season and combined multi-season training datasets.
+**Decision:** Produce one `laps_{year}.parquet` per season during ingest, then combine into `laps_all.parquet` during the clean step. Both live in `data/processed/`.
+**Why:** Per-season files allow re-running a single season's ingest without invalidating other seasons (important when FastF1 retroactively corrects data). The combined file is the single input for all downstream ML steps — no joins or glob patterns needed. Clean step is idempotent and fast (<1s to rebuild `laps_all.parquet` once per-season files exist).
+**Alternatives considered:** Single combined Parquet updated incrementally (rejected: no clean re-ingest path for one season); one file per race (rejected: too many files, slower to load for training).
+
 ## 2026-XX-XX — Parquet over SQLite for data storage
 **Context:** Need to store ~120K rows of lap data + telemetry across 5 seasons.
 **Decision:** Parquet files in `data/processed/`.

@@ -110,3 +110,38 @@
 - Full 2024 + multi-season backfill deferred to Phase 1.3
 
 **Open questions:** None — Phase 1.3 runs the full backfill and adds the cleaning module.
+
+---
+
+## Phase 1.3 — Multi-Season Backfill + Cleaning (2026-04-23)
+**Built:**
+- `backend/src/pitiq/data/clean.py` — `drop_inaccurate()`, `drop_in_out_laps()`, `fuel_correct()`, `clean_season()`, `build_combined()`; CLI via `python -m pitiq.data.clean`
+- Fuel correction adds `LapTimeCorrected` and `FuelCorrectionS` columns; `--no-fuel-correction` flag for debugging
+- Backfill script ran all 5 seasons sequentially in background, logging to `data/backfill.log`
+- `backend/tests/test_clean.py` — 9 tests covering all cleaning steps + edge cases
+
+**Worked well:** FastF1's `"Failed to align laps"` and `"all laps marked as inaccurate"` warnings are normal for backmarker drivers in specific sessions — `drop_inaccurate` handles them cleanly. Partial backfills work without code changes (missing season files logged and skipped).
+
+**Pain points:**
+- `drop_in_out_laps` removed 0 rows after `drop_inaccurate` — turns out `IsAccurate=False` already flags all in/out laps in FastF1's model, so the two steps are somewhat redundant. Keeping both for explicitness and defensiveness against FastF1 API changes.
+- 2021 season had the fewest rounds (21) because the Belgian GP was cancelled mid-session — counted as a round in the schedule but yielded minimal clean laps.
+
+**Metrics — 5-season breakdown:**
+
+| Year | Raw laps | After clean | Races | Drivers |
+|------|----------|-------------|-------|---------|
+| 2021 | 23,758   | 20,735      | 21    | 21      |
+| 2022 | 23,577   | 19,639      | 22    | 22      |
+| 2023 | 24,422   | 21,283      | 22    | 22      |
+| 2024 | 26,606   | 23,557      | 24    | 24      |
+| 2025 | 26,692   | 23,043      | 24    | 21      |
+| **Total** | **125,055** | **108,257** | **113** | **35** |
+
+**Fuel correction validation:**
+- Mean correction: **1.659 s** (lap 1 at 110 kg load → lap ~61 at 0 kg)
+- Correction range: **0.000 – 3.246 s**
+- Monotonicity check: `LapTimeCorrected ≤ LapTime` passed on **all 108,257 rows**
+
+**Null counts on clean dataset:** Only `TyreLife` (887) and `Stint` (382) have any nulls — FastF1 source gaps on specific laps. All other core columns, all 4 telemetry summaries, and both corrected-time columns are fully populated.
+
+**Open questions:** `TyreLife` and `Stint` nulls (~1% of rows each) — may need imputation strategy in Phase 2 feature engineering. Will decide there.

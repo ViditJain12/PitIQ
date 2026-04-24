@@ -85,3 +85,28 @@
 - 5/5 pytest tests green in 2.09s
 
 **Open questions:** None — Phase 1.2 will use `load_telemetry=True` selectively per driver for the telemetry summary columns.
+
+---
+
+## Phase 1.2 — Lap & Telemetry Ingestion (2026-04-23)
+**Built:**
+- `backend/src/pitiq/data/ingest.py` — `ingest_season(year, max_races=None)` iterates `fastf1.get_event_schedule()`, loads each race with `load_telemetry=True`, extracts laps and telemetry summaries, concatenates and saves Parquet
+- `_extract_session()` — 17 lap columns from FastF1 laps DataFrame + `Year`, `RoundNumber`, `EventName` context; all timedelta columns converted to float seconds
+- `_telemetry_summary()` — per-lap scalar features: `tel_speed_avg`, `tel_speed_max`, `tel_throttle_pct`, `tel_brake_pct`; returns `{}` on any failure — missing telemetry is skipped and logged, never a crash
+- `backend/src/pitiq/data/__main__.py` — enables `python -m pitiq.data.ingest --season 2024`
+- `--max-races N` flag for fast dev/test iteration
+- `backend/tests/test_ingest.py` — 7 tests: DataFrame returned, expected columns, row count sanity, LapTime in valid range, telemetry cols are float, Parquet written, Parquet readable
+
+**Worked well:** FastF1's `"Car data is incomplete"` warnings (e.g. Jeddah driver 55, missing safety car laps) pass through harmlessly — the `_telemetry_summary` try/except absorbs them at the lap level without any special casing. Zero nulls in telemetry columns on complete-data laps.
+
+**Pain points:**
+- FastF1 returns timedeltas for `LapTime`, `Sector*Time`, `PitInTime`, `PitOutTime` — Parquet doesn't support `timedelta64` natively; must convert to float seconds before writing (see DECISIONS.md).
+- `python -m pitiq.data.ingest` requires a `__main__.py` in the package directory, not just an `if __name__ == "__main__"` block in `ingest.py` — added `data/__main__.py` as a thin wrapper.
+
+**Metrics:**
+- Smoke test (2 races: Bahrain + Saudi 2024): **2,030 laps**, 21 drivers, 24 columns
+- Zero telemetry nulls on fully-present races; partial telemetry handled gracefully
+- 7/7 pytest tests green in 2:10 (Bahrain cache hit, Saudi network fetch)
+- Full 2024 + multi-season backfill deferred to Phase 1.3
+
+**Open questions:** None — Phase 1.3 runs the full backfill and adds the cleaning module.

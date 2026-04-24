@@ -27,6 +27,12 @@
 **Why:** No pure-Python fallback; without it XGBoost won't load.
 **Alternatives considered:** Pinning an older XGBoost (rejected: newer versions have better Python 3.13 support).
 
+## 2026-04-23 — Timedelta columns converted to float seconds before Parquet write
+**Context:** FastF1 returns `LapTime`, `Sector1/2/3Time`, `PitInTime`, `PitOutTime` as `timedelta64[ns]`. PyArrow (the Parquet backend) does not have a native timedelta type and raises a conversion error on write.
+**Decision:** Convert all timedelta columns to float seconds via `.dt.total_seconds()` at extraction time in `_extract_session()`.
+**Why:** Float seconds is the natural unit for ML features anyway (XGBoost, feature engineering all expect numeric inputs). Keeping them as timedeltas would require conversion at every downstream consumer.
+**Alternatives considered:** Storing as integer nanoseconds (rejected: harder to read and reason about); storing as strings (rejected: lossy and slow to re-parse).
+
 ## 2026-04-22 — Tailwind CSS v4 (not v3)
 **Context:** `npm install tailwindcss` pulled v4.2.4. v4 has a completely different config model — no `tailwind.config.js`, no `postcss.config.js`; uses a Vite plugin instead.
 **Decision:** Stay on v4 with `@tailwindcss/vite` plugin.

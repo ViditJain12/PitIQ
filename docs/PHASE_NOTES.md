@@ -172,3 +172,35 @@
 - **Lap 1 is systematically absent** from the dataset (dropped by `IsAccurate=False` in Phase 1.3). This makes `laps_remaining` off by 1 for every race (reads 51 at Monza instead of 52). Not a modeling concern — consistent across all races — but the `RaceEnv` in Phase 4 should initialise `laps_remaining` from the known total, not from the feature dataset.
 
 **Open questions:** `TyreLife`/`Stint` nulls propagate into `tire_age`/`stint_number` (887 and 382 rows respectively, ~1% each). Imputation strategy TBD in Phase 3 when we see whether XGBoost handles them natively or needs explicit filling.
+
+---
+
+## Phase 2.2 — Train/Test Split + EDA Notebook (2026-04-24)
+**Built:**
+- `backend/src/pitiq/features/split.py` — `split_features()` + `save_splits()` + CLI (`python -m pitiq.features.split`)
+- Race-based split: train = 2021–2024 (85,214 laps, 89 races), val = 2025 R1–12 (11,103 laps, 12 races), test = 2025 R13–24 (11,940 laps, 12 races)
+- `_verify_no_overlap()` asserts no (Year, RoundNumber) key shared across splits — fires at runtime not just in tests
+- `backend/tests/test_split.py` — 8/8 tests green
+- `notebooks/01_eda.ipynb` — 6 sections: missing data audit, compound usage, tire degradation, lap time distributions, wet vs dry delta, split summary
+
+**Worked well:**
+- Wet vs dry fix (compound-based indicator instead of session-level `is_wet`) worked cleanly: +8.13s overall penalty, all 11 wet-circuit deltas positive, Monaco (+18s) and Singapore (+22s) highest as expected.
+- Split summary validates cleanly: 89 + 12 + 12 = 113 races, zero overlap.
+- Null audit confirms pipeline integrity: only `tire_age`/`TyreLife` have nulls (~0.17%), all other columns 0.
+
+**Pain points — tire degradation visualization (three-iteration debugging process):**
+
+1. **First attempt (absolute LapTimeCorrected):** Curves were inverted at 3/5 circuits. Diagnosed as survivorship bias + fuel load confound: longer stints are run by faster drivers in clean air, inflating apparent late-stint pace.
+
+2. **Second attempt (per-stint relative degradation):** Subtracted each stint's baseline lap from subsequent laps. Produced empty plots. Root cause: `tire_age == 1` rows are dropped by `IsAccurate=False` cleaning (pit-out laps), so the `tire_age == 1` filter matched zero rows, `stint_baseline` was all-NaN. Fixed to use min `tire_age` per stint instead. Then hit `KeyError: nan` — the 183 null `tire_age` rows caused `idxmin()` to return `NaN` as a DataFrame index. Fixed by pre-filtering nulls. Curves then rendered but remained physically impossible (Monaco Medium −2.5s at lap 20): tire warm-up in laps 2–5 means the baseline lap is genuinely slow, making all subsequent warmed-up laps look faster.
+
+3. **Third attempt (controlled conditions, absolute LapTimeCorrected):** Stint 1 only, top-10 finishers, green-flag filter (median + 3σ), minimum 10 laps per tire_age bucket. Belgian GP produced a clean upward curve. Other circuits revealed compound-allocation bias: each circuit has one dominant stint-1 compound (Bahrain = Soft, Monza/Singapore = Medium), so only one curve renders per circuit. Remaining V-shapes at Monaco/Bahrain are warm-up effect (cold tire laps 1–3 appear slow, improve as tire comes into window) and traffic clearing (cars ahead pit, driver gains clean air mid-stint).
+
+**Decision:** Accept EDA limitations. Belgian GP is sufficient proof of real degradation signal in the data. The confounds (warm-up, traffic, allocation bias) are lap-level context the XGBoost model will learn directly from features — they don't require resolution at the EDA stage. Documented honestly in the notebook markdown. Revisit if Phase 3 MAE is poor on high-deg circuits.
+
+**Metrics:**
+- Split: 85,214 train / 11,103 val / 11,940 test (107,257 total — 765 rows excluded at notebook load for Compound=None/nan)
+- Wet penalty: +8.13s overall; 11 circuits with wet-compound laps, all positive deltas
+- 8/8 split tests green
+
+**Open questions:** Whether XGBoost handles the warm-up effect implicitly (early `tire_age` laps may need a `is_warmup_lap` feature). Defer to Phase 3 feature importance analysis.

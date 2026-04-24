@@ -88,11 +88,17 @@
 **Why:** Faster columnar reads for ML pipelines, schema-on-read, no DB server to manage. SQLite would add overhead for a workload that's effectively read-only after ingest.
 **Alternatives considered:** SQLite (rejected: unnecessary for analytical workload), DuckDB (good option, can revisit if querying becomes complex).
 
-## 2026-XX-XX — Split train/test BY RACE not random
-**Context:** ML pipeline needs train/val/test splits.
-**Decision:** Split by race weekend, not random row sampling.
-**Why:** Random splitting causes data leakage — model sees laps from the same race in both train and test, inflating metrics. Splitting by race forces the model to generalize to unseen race conditions.
-**Alternatives considered:** Random 80/10/10 (rejected: leakage), split by season (acceptable but reduces test diversity).
+## 2026-04-24 — Split train/val/test BY RACE not random rows
+**Context:** ML pipeline needs train/val/test splits. The dataset has 113 race weekends across 5 seasons (2021–2025).
+**Decision:** Split by race weekend: train = 2021–2024 full seasons, val = 2025 rounds 1–12, test = 2025 rounds 13–24. All laps from a given race stay together.
+**Why:** Random row splitting causes data leakage — the model sees laps from the same race in both train and test (same track conditions, weather, rival behaviour). This inflates val/test metrics by letting the model memorise race-specific effects rather than generalising. Splitting by race forces generalisation to unseen race weekends. Using 2025 as the holdout year also provides temporal separation (model must generalise forward in time), which matches real-world deployment.
+**Alternatives considered:** Random 80/10/10 (rejected: leakage); split by season (train 2021–2023, val 2024, test 2025 — acceptable but reduces training data and val diversity); per-circuit stratified split (rejected: leaks temporal patterns).
+
+## 2026-04-24 — Proceed to Phase 3 despite confounded EDA degradation plots
+**Context:** Three iterations of tire degradation visualization (absolute, per-stint relative, controlled-conditions) all produced physically implausible curves at most circuits. Belgian GP was the only circuit to show a clean monotonic upward curve.
+**Decision:** Accept the EDA limitation and proceed to Phase 3 (XGBoost training) without resolving the visualization confounds.
+**Why:** The confounds are well understood (tire warm-up laps 1–5, traffic clearing mid-stint, Pirelli compound-allocation bias per circuit) and are all lap-level contextual effects that XGBoost will learn directly from features (`tire_age`, `Stint`, `position`, `laps_remaining`). EDA plots are aggregate views that can't condition on these variables simultaneously. The Belgian GP curve proves the degradation signal exists in the data. Poor MAE in Phase 3 on specific circuits would be a more actionable signal than better-looking EDA plots.
+**Alternatives considered:** Further EDA iteration with per-driver-per-stint normalization (rejected: adds complexity, still wouldn't remove warm-up effect); adding a `is_warmup_lap` binary feature to the feature set (possible, deferred to Phase 3 feature importance analysis).
 
 ## 2026-XX-XX — Compute driver style features once, treat as static features
 **Context:** Driver styles evolve over time, but recomputing dynamically is expensive.

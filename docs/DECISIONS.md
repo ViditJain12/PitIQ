@@ -118,6 +118,12 @@
 **Why:** Circuit speed differences (São Paulo 82.7s vs Belgium 120.2s on INT — a 37s gap) completely swamp driver skill differences (±1–2s) when using a global baseline. Race-normalisation removes this confound entirely. Post-fix COL moved to +0.36s and LAW to +0.45s (both slightly below race peers, plausible for rookies). VER moved from −1.72s to −1.11s (still correctly the fastest wet driver in the dataset).
 **Alternatives considered:** Per-circuit normalisation (rejected: reduces sample sizes per driver, and same-race normalisation is strictly better since it also controls for conditions within a circuit on a given day); compound-separate global medians (rejected: doesn't address the circuit-mix problem, only the compound-type problem).
 
+## 2026-04-24 — Replaced sector_profile_{s1,s2,s3} with overall_pace_rank + sector_relative_{s1,s2,s3}
+**Context:** Initial style vector included three absolute avg-rank features (`sector_profile_s1/s2/s3`). Correlation heatmap in Phase 2.5.2 revealed all three correlated at r = +0.99 — they were three noisy copies of "how fast is this driver overall," not measures of where they gain or lose time.
+**Decision:** Decompose into: `overall_pace_rank` = mean(s1_rank, s2_rank, s3_rank) + `sector_relative_{s1,s2,s3}` = s{N}_rank − overall_pace_rank.
+**Why:** The decomposition separates two orthogonal signals: (1) overall quality captured cleanly in one feature instead of three redundant ones, and (2) sector specialisation — whether a driver over- or under-performs relative to their own mean in each sector type (low-speed, high-speed, mixed). Post-fix inter-correlations: r = −0.40 to −0.55, expected from the sum-to-zero constraint. Feature count went from 10 → 11 (net +2 useful features, −2 redundant ones).
+**Alternatives considered:** Keep only `overall_pace_rank` and drop all sector_relative (rejected: discards potentially useful specialisation signal — Phase 3 feature importance will confirm whether to drop); keep the raw three features but add PCA (rejected: adds complexity and loses interpretability).
+
 ## 2026-XX-XX — Compute driver style features once, treat as static features
 **Context:** Driver styles evolve over time, but recomputing dynamically is expensive.
 **Decision:** Compute style vectors once across all 5 seasons, treat as static features per driver.

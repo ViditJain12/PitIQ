@@ -17,7 +17,9 @@ Features per driver (one row per driver in driver_styles.parquet):
                                      faster); NaN if driver has < MIN_WET_LAPS wet-compound laps
   tire_saving_coef                 — median(early-stint avg / late-stint avg) per stint;
                                      > 1.0 means driver paces slower early = tire saving
-  sector_profile_s1/s2/s3         — avg lap rank (1=best, 20=worst) per sector, green-flag laps
+  overall_pace_rank               — mean avg sector rank across s1/s2/s3 (lower = faster overall)
+  sector_relative_s1/s2/s3       — s{N}_rank minus overall_pace_rank; negative = driver
+                                   specialises in that sector vs their own average (sum-to-zero)
 
 CLI:
     python -m pitiq.styles.build
@@ -204,7 +206,20 @@ def _tire_saving_coef(df: pd.DataFrame, drivers: list[str]) -> pd.DataFrame:
 
 
 def _sector_profile(df: pd.DataFrame, drivers: list[str]) -> pd.DataFrame:
-    """Avg rank (1=best, N=worst) per sector, computed per (Year, RoundNumber, LapNumber)."""
+    """Sector specialisation features computed from per-lap sector rankings.
+
+    Per-lap rank (1=best, N=worst) is computed within each (Year, RoundNumber, LapNumber)
+    group, then averaged per driver to get mean sector ranks. The three raw ranks are
+    highly correlated (r≈0.99) because they largely reflect overall pace, not where a
+    driver specifically gains or loses time.
+
+    To separate 'overall pace' from 'sector specialisation', we decompose:
+      overall_pace_rank     = mean(s1_rank, s2_rank, s3_rank)   — lower = faster overall
+      sector_relative_s{N}  = s{N}_rank − overall_pace_rank     — negative = driver
+                              specialises in that sector relative to their own average
+
+    The three sector_relative features sum to zero by construction.
+    """
     green = df[df["TrackStatus"] == GREEN_STATUS].copy()
 
     for s in [1, 2, 3]:
@@ -216,13 +231,14 @@ def _sector_profile(df: pd.DataFrame, drivers: list[str]) -> pd.DataFrame:
     avg_ranks = (
         green.groupby("Driver")[["_s1_rank", "_s2_rank", "_s3_rank"]]
              .mean()
-             .rename(columns={
-                 "_s1_rank": "sector_profile_s1",
-                 "_s2_rank": "sector_profile_s2",
-                 "_s3_rank": "sector_profile_s3",
-             })
     )
-    return avg_ranks.reindex(drivers)
+    avg_ranks["overall_pace_rank"] = avg_ranks.mean(axis=1)
+    avg_ranks["sector_relative_s1"] = avg_ranks["_s1_rank"] - avg_ranks["overall_pace_rank"]
+    avg_ranks["sector_relative_s2"] = avg_ranks["_s2_rank"] - avg_ranks["overall_pace_rank"]
+    avg_ranks["sector_relative_s3"] = avg_ranks["_s3_rank"] - avg_ranks["overall_pace_rank"]
+
+    out = avg_ranks[["overall_pace_rank", "sector_relative_s1", "sector_relative_s2", "sector_relative_s3"]]
+    return out.reindex(drivers)
 
 
 def build_driver_styles() -> tuple[pd.DataFrame, list[str], list[str]]:

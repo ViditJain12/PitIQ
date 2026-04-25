@@ -249,3 +249,32 @@
 - Runtime: <1 second
 
 **Open questions:** Whether `pace_trend_*` or `tire_saving_coef` show up in Phase 3 XGBoost feature importance — if neither does, consider dropping them from the style vector to reduce dimensionality.
+
+---
+
+## Phase 2.5.2 — Driver Style Validation Notebook (2026-04-24)
+**Built:**
+- `notebooks/02_driver_styles.ipynb` — 5-section validation suite for `driver_styles.parquet`
+- Sections: styled summary table, 4 radar chart comparisons, k-means clustering with PCA scatter, cluster sanity check, pairwise correlation heatmap
+
+**Validation results — what matched expectations:**
+- **Radar charts:** VER polygon envelops HAM on most axes (overall pace, wet skill). NOR ≈ PIA as expected for McLaren teammates — strongest confirmation the features are consistent within team/car. ZHO smaller than HUL on wet-skill axis (ZHO known wet struggles). LEC and SAI similar shapes; LEC edges SAI on overall pace axis.
+- **PCA scatter:** PC1 (26.4% variance) separates drivers cleanly by quality — VER/NOR/LEC at one end, MAZ/MSC/SAR at the other. PC2 appears to capture braking/throttle style dimensions. Clean axis structure confirms the feature set has real signal, not noise.
+- **Clustering (k=4, silhouette 0.151):** Soft clusters reflecting a continuum rather than crisp archetypes, which is honest — F1 driver styles don't fall into discrete buckets. The quality separation (Cluster 0 top-tier vs Cluster 1 backmarkers) is clean. Cluster 2 (RAI/GIO/LAT, 3 drivers) is a small cluster distinguished by high braking aggression and smoothness — plausibly an Alfa Romeo/Ferrari lineage style artefact, but too small to over-interpret.
+
+**Major finding during validation — sector_profile redundancy:**
+Initial heatmap showed `sector_profile_s1` vs `sector_profile_s2` vs `sector_profile_s3` all correlating at r = +0.99. Three features were collapsing to one signal: "how fast is this driver overall." The original intent — to capture *where* drivers gain time per sector — was not being achieved.
+
+Fix: decompose into:
+- `overall_pace_rank` = mean(s1_rank, s2_rank, s3_rank) — captures overall quality (what the old features were really measuring)
+- `sector_relative_{s1,s2,s3}` = s{N}_rank − overall_pace_rank — captures sector specialisation (positive = gives time in that sector, negative = gains time)
+
+Post-fix inter-correlations: rel_s1 vs rel_s2 = −0.55, rel_s1 vs rel_s3 = −0.40, rel_s2 vs rel_s3 = −0.55. The negative correlations are expected (sum-to-zero constraint) and confirm the features now carry independent information.
+
+**Acknowledged limitation:**
+`wet_skill_delta` vs `overall_pace_rank`: r = +0.90. Better drivers are faster in wet conditions just as they are in dry — top drivers (VER, NOR, PIA) show negative wet deltas for the same reason they have low sector ranks. This is a real-world confound, not a fixable pipeline artifact. The feature is kept because it may still help XGBoost on wet-specific lap predictions where the marginal skill difference matters. Phase 3 feature importance will determine whether it contributes beyond what `overall_pace_rank` already provides.
+
+**Final feature set: 11 features per driver**
+`pace_trend_soft`, `pace_trend_medium`, `pace_trend_hard`, `cornering_aggression`, `throttle_smoothness`, `wet_skill_delta`, `tire_saving_coef`, `overall_pace_rank`, `sector_relative_s1`, `sector_relative_s2`, `sector_relative_s3`
+
+**Open questions:** Whether sector_relative features show meaningful importance in Phase 3 XGBoost — if all three are near-zero importance, consider dropping the specialisation decomposition and keeping only `overall_pace_rank`.

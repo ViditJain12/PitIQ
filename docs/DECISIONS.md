@@ -100,6 +100,24 @@
 **Why:** The confounds are well understood (tire warm-up laps 1–5, traffic clearing mid-stint, Pirelli compound-allocation bias per circuit) and are all lap-level contextual effects that XGBoost will learn directly from features (`tire_age`, `Stint`, `position`, `laps_remaining`). EDA plots are aggregate views that can't condition on these variables simultaneously. The Belgian GP curve proves the degradation signal exists in the data. Poor MAE in Phase 3 on specific circuits would be a more actionable signal than better-looking EDA plots.
 **Alternatives considered:** Further EDA iteration with per-driver-per-stint normalization (rejected: adds complexity, still wouldn't remove warm-up effect); adding a `is_warmup_lap` binary feature to the feature set (possible, deferred to Phase 3 feature importance analysis).
 
+## 2026-04-24 — Renamed tire_deg_rate_* to pace_trend_* 
+**Context:** Initial implementation named the OLS slope columns `tire_deg_rate_{soft,medium,hard}`. First run showed most slopes were negative — physically impossible if interpreted as tire degradation rates.
+**Decision:** Rename to `pace_trend_{soft,medium,hard}` and update docstring to explain the measurement.
+**Why:** The slopes measure net pace change (tire degradation minus track evolution) in the stint-1, green-flag, tire_age ≥ 5 window. Track evolution (rubber build-up) is a real, competing effect that often outpaces tire wear in early stints. Negative values are physically correct and expected. The old name implied pure tire wear, which is misleading. The relative driver-to-driver ordering in these slopes is still a valid style signal for XGBoost.
+**Alternatives considered:** Filtering to later stints where track evolution is smaller (rejected: smaller sample sizes, different confounds); subtracting a circuit-level track evolution baseline (rejected: too complex, introduces new estimation error).
+
+## 2026-04-24 — Minimum 20-lap threshold for wet_skill_delta
+**Context:** First implementation computed wet_skill_delta for any driver with ≥1 wet-compound lap. HAD had 9 wet laps producing a large outlier.
+**Decision:** Require ≥ 20 wet-compound laps; fewer → NaN.
+**Why:** With <20 laps, a single chaotic session dominates the median. 20 laps represents at least one full wet-compound stint across 1–2 races — enough for a median to be meaningful.
+**Alternatives considered:** 10-lap threshold (too few for a stable median on a noisy metric like wet pace), no threshold (produces outliers that corrupt downstream model inputs).
+
+## 2026-04-24 — Race-normalised wet_skill_delta (vs global median)
+**Context:** Initial wet_skill_delta was computed as driver median minus grid-wide INT/WET median. COL showed −9.4s and LAW −8.9s despite being rookies — implausible vs VER at −1.7s. Investigation showed COL's 31 wet laps were 24 from São Paulo 2024 (circuit INT median 82.7s) while the grid-wide INT median was 92.2s — a 9.5s circuit-speed difference unrelated to driver skill.
+**Decision:** Compute wet_skill_delta as the median of per-lap deviations from the same-race, same-compound median. Each lap is compared only to other drivers at the same race on the same compound.
+**Why:** Circuit speed differences (São Paulo 82.7s vs Belgium 120.2s on INT — a 37s gap) completely swamp driver skill differences (±1–2s) when using a global baseline. Race-normalisation removes this confound entirely. Post-fix COL moved to +0.36s and LAW to +0.45s (both slightly below race peers, plausible for rookies). VER moved from −1.72s to −1.11s (still correctly the fastest wet driver in the dataset).
+**Alternatives considered:** Per-circuit normalisation (rejected: reduces sample sizes per driver, and same-race normalisation is strictly better since it also controls for conditions within a circuit on a given day); compound-separate global medians (rejected: doesn't address the circuit-mix problem, only the compound-type problem).
+
 ## 2026-XX-XX — Compute driver style features once, treat as static features
 **Context:** Driver styles evolve over time, but recomputing dynamically is expensive.
 **Decision:** Compute style vectors once across all 5 seasons, treat as static features per driver.

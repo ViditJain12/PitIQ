@@ -204,3 +204,48 @@
 - 8/8 split tests green
 
 **Open questions:** Whether XGBoost handles the warm-up effect implicitly (early `tire_age` laps may need a `is_warmup_lap` feature). Defer to Phase 3 feature importance analysis.
+
+---
+
+## Phase 2.5.1 — Driver Style Fingerprinting (2026-04-24)
+**Built:**
+- `backend/src/pitiq/styles/build.py` — `build_driver_styles()` + `save_driver_styles()` + CLI (`python -m pitiq.styles.build`)
+- 33 driver style vectors × 10 features saved to `data/features/driver_styles.parquet`
+- Features: `pace_trend_{soft,medium,hard}`, `cornering_aggression`, `throttle_smoothness`, `wet_skill_delta`, `tire_saving_coef`, `sector_profile_{s1,s2,s3}`
+- Filters throughout: green-flag only (`TrackStatus == '1'`), minimum lap thresholds per feature, NaN for insufficient data rather than crash
+
+**Iteration story (7 steps from first run to validated output):**
+
+1. **Initial implementation:** All 10 features computed, parquet written, ran in <1s. First output showed COL −9.4s and LAW −8.9s wet deltas — flagged as implausible for rookies.
+
+2. **Three issues identified from initial output:**
+   - `tire_deg_rate_*` slopes were negative for most drivers on SOFT/MEDIUM — track evolution dominates tire wear in stint-1 green-flag data.
+   - `wet_skill_delta` had extreme outliers (COL −9.4, LAW −8.9) despite 31 and 104 wet laps respectively — not a sample-size problem.
+   - `tire_saving_coef` had very low cross-driver variance (0.984–0.999 range) — limited discriminatory power.
+
+3. **Renamed `tire_deg_rate_*` → `pace_trend_*`:** The slopes measure net pace change (degradation minus track evolution), not pure tire wear. In stint 1, the track is still rubbering in, so track evolution often outweighs tire degradation, producing negative slopes. Relative ordering between drivers remains valid style signal. Updated docstring to explain exactly what's measured and why negative values are expected.
+
+4. **Added `MIN_WET_LAPS = 20` threshold:** Drivers with fewer than 20 wet-compound laps receive `wet_skill_delta = NaN`. HAD (9 laps) was correctly nulled. COL (31) and LAW (104) survived — their outliers were a different issue.
+
+5. **Diagnosed circuit-mix confound in `wet_skill_delta`:** Per-race breakdown revealed COL's 24/31 wet laps were from São Paulo 2024 (circuit median 82.7s on INT), while the grid-wide INT median was 92.2s — a 9.5s circuit speed difference with nothing to do with driver skill. COL vs his São Paulo race peers was +0.16s (dead average). The issue was using a global median as the baseline.
+
+6. **Applied race-normalised fix:** Changed `wet_skill_delta` to compute per-lap deviation from same-race, same-compound median, then take driver median. This removes circuit-mix confound entirely. COL moved to +0.36s, LAW to +0.45s (as predicted by the diagnosis).
+
+7. **Validated final output:** All sanity checks passed. ZHO at +3.636s was investigated — 192 wet laps across 9 races, consistently +1.0 to +3.9s slower than race peers at every circuit. Confirmed genuine signal (Zhou Guanyu observed as a weak wet driver throughout his F1 career), not an artifact.
+
+**Sanity checks passed:**
+- `sector_profile_s1`: VER 4.4, PER 6.0, LEC 6.2, HAM 6.2 (top of the field), MAZ 16.5 (back of the grid). Matches known driver quality rankings.
+- `wet_skill_delta` final: VER −1.11s, NOR −0.78s, HAM −0.38s, ALO +0.12s. Spread of −1.1 to +3.6s. VER strongest wet driver in the data, matches widely-held view.
+
+**Known limitations:**
+- `pace_trend_*`: Measures net pace change, not pure tire wear. Cannot separate tire degradation from track evolution at this aggregation level. Relative driver ordering still useful for XGBoost, but absolute values are not interpretable as degradation rates.
+- `tire_saving_coef`: Low variance (0.984–0.999). Feature is kept but may contribute little signal in Phase 3. Feature importance analysis in Phase 3 will confirm.
+- Style vectors are static across all 5 seasons. A driver who changed style significantly (e.g. Hamilton at Mercedes vs Ferrari) will have blended values. Acceptable for current scope.
+
+**Metrics:**
+- 33 drivers processed, 2 excluded (DOO: 247 laps, KUB: 113 laps — both one-off or reserve appearances)
+- 1 driver nulled for `wet_skill_delta` (HAD: 9 wet laps)
+- Total NaN count: 4 cells (pace_trend_soft ×1, pace_trend_hard ×2, wet_skill_delta ×1)
+- Runtime: <1 second
+
+**Open questions:** Whether `pace_trend_*` or `tire_saving_coef` show up in Phase 3 XGBoost feature importance — if neither does, consider dropping them from the style vector to reduce dimensionality.

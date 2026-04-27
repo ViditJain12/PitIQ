@@ -1,13 +1,29 @@
 """Race-based train/val/test split for lap_features.parquet.
 
-Split policy (no data leakage):
-  train  — 2021–2024 full seasons
-  val    — 2025 rounds 1–12  (first half)
-  test   — 2025 rounds 13–24 (second half)
+Split policy (explicit stratified race selection):
+  test  — 6 races spanning 2024–2025 with mixed training history:
+            2024 R14  Belgian GP          (stable: 3 train years)
+            2024 R19  United States GP    (stable: 4 train years)
+            2024 R23  Qatar GP            (stable: 3 train years)
+            2025 R7   Emilia Romagna GP   (stable: 3 train years)
+            2025 R15  Dutch GP            (stable: 4 train years)
+            2025 R22  Las Vegas GP        (sparse: 2 train years)
+  val   — 4 races for early stopping signal diversity:
+            2024 R20  Mexico City GP
+            2024 R24  Abu Dhabi GP
+            2025 R12  British GP
+            2025 R18  Singapore GP
+  train — all remaining races (~98,000 laps)
 
-Splitting by race ensures all laps from a given race weekend stay together.
-Random row-level splits would leak track conditions, weather, and rival
-behaviour across splits, inflating val/test metrics.
+Using explicit (Year, RoundNumber) sets avoids accidental boundary-creep
+and makes the intended holdouts completely transparent. The test set mixes
+5 high-data circuits (≥3 train years) with 1 sparse circuit (Las Vegas,
+F1 calendar since 2023) for an honest stable-vs-sparse MAE comparison.
+
+Note on round numbers: the 2024 and 2025 F1 calendars share circuit names
+but use different round numbers (e.g. British GP = 2024 R12, 2025 R12;
+Belgian GP = 2024 R14, 2025 R13). All round numbers here were verified
+against the ingested data.
 
 CLI:
     python -m pitiq.features.split
@@ -25,8 +41,21 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT    = Path(__file__).parents[4]
 _FEATURES_DIR = _REPO_ROOT / "data" / "features"
 
-VAL_MAX_ROUND  = 12   # 2025 rounds 1-12  → val
-TEST_MIN_ROUND = 13   # 2025 rounds 13-24 → test
+# Explicit (Year, RoundNumber) sets — verified against ingested calendar
+TEST_RACES: frozenset[tuple[int, int]] = frozenset({
+    (2024, 14),   # Belgian GP
+    (2024, 19),   # United States GP
+    (2024, 23),   # Qatar GP
+    (2025,  7),   # Emilia Romagna GP
+    (2025, 15),   # Dutch GP
+    (2025, 22),   # Las Vegas GP
+})
+VAL_RACES: frozenset[tuple[int, int]] = frozenset({
+    (2024, 20),   # Mexico City GP
+    (2024, 24),   # Abu Dhabi GP
+    (2025, 12),   # British GP
+    (2025, 18),   # Singapore GP
+})
 
 
 def split_features(src: Path | None = None) -> dict[str, pd.DataFrame]:
@@ -38,9 +67,14 @@ def split_features(src: Path | None = None) -> dict[str, pd.DataFrame]:
     df = pd.read_parquet(path)
     logger.info("Loaded %d rows from %s", len(df), path)
 
-    train = df[df["Year"] <= 2024].copy()
-    val   = df[(df["Year"] == 2025) & (df["RoundNumber"] <= VAL_MAX_ROUND)].copy()
-    test  = df[(df["Year"] == 2025) & (df["RoundNumber"] >= TEST_MIN_ROUND)].copy()
+    race_key = list(zip(df["Year"], df["RoundNumber"]))
+    test_mask  = pd.Series([k in TEST_RACES  for k in race_key], index=df.index)
+    val_mask   = pd.Series([k in VAL_RACES   for k in race_key], index=df.index)
+    train_mask = ~test_mask & ~val_mask
+
+    train = df[train_mask].copy()
+    val   = df[val_mask].copy()
+    test  = df[test_mask].copy()
 
     _verify_no_overlap(train, val, test)
 

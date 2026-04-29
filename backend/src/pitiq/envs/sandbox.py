@@ -68,54 +68,90 @@ _N_RIVALS            = _GRID_SIZE - 1
 _GAP_PER_POS_S       = 1.5   # initial headway between adjacent grid positions
 
 
-# ── Rival baseline ─────────────────────────────────────────────────────────────
+# ── Rival profile (pitting model) ─────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def _load_circuit_rival_baseline() -> dict[tuple[str, int], float]:
-    """Mean LapTimeCorrected for top-10 finishers per (circuit, year) in training data.
-
-    Training races = all races NOT in the val/test frozensets from split.py.
-    Returns dict keyed by (EventName, year_int) → mean lap time (seconds).
-
-    Fallback: callers that request a missing (circuit, year) should call
-    _get_rival_pace() which falls back to the closest available year.
-    """
+def _training_data() -> pd.DataFrame:
+    """Load training-split lap features once, cache indefinitely."""
     from pitiq.features.split import TEST_RACES, VAL_RACES
     df = pd.read_parquet(_FEATURES_DIR / "lap_features.parquet")
     held_out = TEST_RACES | VAL_RACES
     df["_key"] = list(zip(df["Year"].astype(int), df["RoundNumber"].astype(int)))
-    train = df[~df["_key"].isin(held_out) & (df["position"] <= 10)].drop(columns=["_key"])
-    raw = train.groupby(["EventName", "Year"])["LapTimeCorrected"].mean()
-    return {(str(circuit), int(year)): float(pace)
-            for (circuit, year), pace in raw.items()}
+    return df[~df["_key"].isin(held_out)].drop(columns=["_key"])
 
 
-def _get_rival_pace(circuit: str, year: int) -> float:
-    """Return mean rival lap time for (circuit, year), falling back to closest year.
+def _profile_from_subset(sub: pd.DataFrame) -> tuple[float, float, int] | None:
+    """Compute (pace_s1, pace_s2, median_pit_lap) from a circuit/year slice."""
+    top10 = sub[sub["position"] <= 10]
+    if len(top10) < 10:
+        return None
+
+    pace_s1 = float(top10[top10["stint_number"] == 1]["LapTimeCorrected"].mean())
+    s2_laps = top10[top10["stint_number"] == 2]["LapTimeCorrected"]
+    pace_s2 = float(s2_laps.mean()) if len(s2_laps) > 0 else pace_s1
+
+    pit_laps: list[int] = []
+    for _, grp in top10.groupby("Driver"):
+        if grp["stint_number"].max() >= 2:
+            last_s1 = grp[grp["stint_number"] == 1]["LapNumber"].max()
+            if not pd.isna(last_s1):
+                pit_laps.append(int(last_s1))
+
+    if not pit_laps:
+        total = int(sub["LapNumber"].max())
+        return pace_s1, pace_s1, int(total * 0.55)   # no-stop race fallback
+
+    return pace_s1, pace_s2, int(np.median(pit_laps))
+
+
+@lru_cache(maxsize=64)
+def load_circuit_rival_profile(circuit: str, year: int) -> tuple[float, float, int]:
+    """Return (pace_s1_s, pace_s2_s, median_pit_lap) for a representative rival.
+
+    Represents a "typical top-10 driver" doing a 1-stop strategy at this circuit.
+    All paces are mean LapTimeCorrected for top-10 finishers from training data.
 
     Fallback behaviour:
-    - If exact (circuit, year) is in training data: return it.
-    - Else if circuit exists for other years: use the closest year and log a warning.
-    - Else (completely unknown circuit): use the grand mean of all circuits and warn.
+    - Exact (circuit, year): use it.
+    - Circuit exists for other years: use closest year, warn.
+    - Unknown circuit: use grand mean pace, pit at lap 25.
     """
-    baseline = _load_circuit_rival_baseline()
-    if (circuit, year) in baseline:
-        return baseline[(circuit, year)]
+    train = _training_data()
 
-    available = [(y, pace) for (c, y), pace in baseline.items() if c == circuit]
+    sub = train[(train["EventName"] == circuit) & (train["Year"] == year)]
+    if len(sub) > 0:
+        result = _profile_from_subset(sub)
+        if result is not None:
+            return result
+
+    available = sorted(train[train["EventName"] == circuit]["Year"].unique())
     if available:
-        closest_year, pace = min(available, key=lambda t: abs(t[0] - year))
+        closest = int(min(available, key=lambda y: abs(y - year)))
         logger.warning(
-            "No rival baseline for %r year %d — using year %d (Δ%d yr, pace %.3fs)",
-            circuit, year, closest_year, abs(closest_year - year), pace,
+            "No rival profile for %r/%d — falling back to year %d", circuit, year, closest
         )
-        return pace
+        sub = train[(train["EventName"] == circuit) & (train["Year"] == closest)]
+        result = _profile_from_subset(sub)
+        if result is not None:
+            return result
 
-    grand_mean = float(np.mean(list(baseline.values())))
-    logger.warning(
-        "Circuit %r not in training data — using grand mean %.3fs", circuit, grand_mean
+    logger.warning("Circuit %r unknown — using grand-mean rival profile", circuit)
+    top10 = train[train["position"] <= 10]
+    return (
+        float(top10[top10["stint_number"] == 1]["LapTimeCorrected"].mean()),
+        float(top10[top10["stint_number"] == 2]["LapTimeCorrected"].mean()),
+        25,
     )
-    return grand_mean
+
+
+def rival_reference_time(circuit: str, year: int, total_laps: int) -> float:
+    """Expected race duration for a median-rival 1-stop strategy (seconds).
+
+    Used as the reference for ±N% sanity checks in tests.
+    """
+    pace_s1, pace_s2, pit_lap = load_circuit_rival_profile(circuit, year)
+    pit_lap = min(pit_lap, total_laps - 1)
+    return pace_s1 * pit_lap + _PIT_LOSS_S + pace_s2 * (total_laps - pit_lap)
 
 
 # ── Environment ────────────────────────────────────────────────────────────────
@@ -182,9 +218,16 @@ class SandboxRaceEnv(gym.Env):
         self._used_cpds:  set[str] = set()
         self._start_cpd:  str   = "MEDIUM"
 
-        # Rivals — 19 cars at constant circuit-mean pace
-        self._rival_pace: float       = 90.0
+        # Rivals — 19 cars following a 1-stop rival profile
+        self._rival_pace_s1: float    = 90.0   # stint-1 mean pace
+        self._rival_pace_s2: float    = 90.0   # stint-2 mean pace after pit
+        self._rival_pit_lap: int      = 25     # lap on which all rivals pit
         self._rival_cum:  np.ndarray  = np.zeros(_N_RIVALS, dtype=np.float64)
+
+        # Year-specific inferred weather (set by reset(); None = fall back to circuit mean)
+        self._infer_air:   float | None = None
+        self._infer_track: float | None = None
+        self._infer_hum:   float | None = None
 
         # Info carried into render() / info dict
         self._last_lap_time:   float = 0.0
@@ -227,8 +270,30 @@ class SandboxRaceEnv(gym.Env):
         self._last_pit      = False
         self._last_completed_lap = 0
 
-        # Rival constant pace for this circuit/year
-        self._rival_pace = _get_rival_pace(self._circuit, self._year)
+        # Rival 1-stop profile for this circuit/year
+        pace_s1, pace_s2, rival_pit_lap = load_circuit_rival_profile(
+            self._circuit, self._year
+        )
+        self._rival_pace_s1 = pace_s1
+        self._rival_pace_s2 = pace_s2
+        self._rival_pit_lap = rival_pit_lap
+
+        # Year-specific weather — use exact (circuit, year) mean from training data so
+        # XGBoost operates in-distribution. Falls back to circuit-wide mean if no match.
+        train = _training_data()
+        sub_cy = train[(train["EventName"] == self._circuit) & (train["Year"] == self._year)]
+        if len(sub_cy) >= 5:
+            self._infer_air   = float(sub_cy["air_temp"].mean())
+            self._infer_track = float(sub_cy["track_temp"].mean())
+            self._infer_hum   = float(sub_cy["humidity"].mean())
+        else:
+            sub_c = train[train["EventName"] == self._circuit]
+            if len(sub_c) >= 5:
+                self._infer_air   = float(sub_c["air_temp"].mean())
+                self._infer_track = float(sub_c["track_temp"].mean())
+                self._infer_hum   = float(sub_c["humidity"].mean())
+            else:
+                self._infer_air = self._infer_track = self._infer_hum = None
 
         # Rival initial cumulative times encode starting grid positions.
         # A rival at grid P(k) relative to ego at P(start_pos):
@@ -272,9 +337,9 @@ class SandboxRaceEnv(gym.Env):
             position=float(self._position),
             laps_remaining=float(laps_left_after),
             is_wet=bool(self._weather.get("is_wet", False)),
-            air_temp=self._weather.get("air_temp"),
-            track_temp=self._weather.get("track_temp"),
-            humidity=self._weather.get("humidity"),
+            air_temp=self._weather.get("air_temp") or self._infer_air,
+            track_temp=self._weather.get("track_temp") or self._infer_track,
+            humidity=self._weather.get("humidity") or self._infer_hum,
             year=self._year,
         )
         # Fresh-tyre offset (applied uniformly each lap, matching Phase 3.3 convention)
@@ -304,8 +369,16 @@ class SandboxRaceEnv(gym.Env):
         self._lap_num   += 1
         self._tire_age  += 1
 
-        # (f) Update position via cumulative-time rank against static rivals
-        self._rival_cum += self._rival_pace
+        # (f) Update position via cumulative-time rank against pitting rivals.
+        #     Rivals run pace_s1 until their pit lap, absorb 22s on that lap,
+        #     then run pace_s2 for the remainder.
+        if completed_lap < self._rival_pit_lap:
+            rival_this_lap = self._rival_pace_s1
+        elif completed_lap == self._rival_pit_lap:
+            rival_this_lap = self._rival_pace_s1 + _PIT_LOSS_S
+        else:
+            rival_this_lap = self._rival_pace_s2
+        self._rival_cum += rival_this_lap
         n_ahead = int(np.sum(self._rival_cum < self._cum_time))
         self._position  = n_ahead + 1
 

@@ -1,16 +1,23 @@
 """Manual validation for SandboxRaceEnv (Phase 4.1).
 
-Runs 4 strategies on a 53-lap Monza 2025 simulation with VER starting P1 on MEDIUM:
-
-    Strategy 1 — Optimal 1-stop: MEDIUM → HARD on lap 25  (printed lap-by-lap)
+Part 1 — Monza 4-strategy test (VER, P1 pole, MEDIUM start):
+    Strategy 1 — Optimal 1-stop: MEDIUM → HARD on lap 32  (printed lap-by-lap)
     Strategy 2 — No pit:        MEDIUM all race            (violates two-compound rule)
-    Strategy 3 — 2-stop:        MEDIUM → HARD → MEDIUM laps 18 and 36
+    Strategy 3 — 2-stop:        MEDIUM → HARD → MEDIUM laps 18 and 40
     Strategy 4 — Wasteful 4-stop: pits every ~11 laps
 
-Validation assertions:
-    - 1-stop total race time < 4-stop total race time
-    - 53-lap Monza cum. time within ±3% of historical avg (~87 min)
-    - two_compound_rule_violated == True only for Strategy 2
+    Assertions: 1-stop < 4-stop race time, rule-violation flag correct.
+
+Part 2 — 5-circuit polesitter test (2024 season, 1-stop each, pitting at rival median lap):
+    Italian GP (Monza, low deg)   — PIA, 53 laps
+    Bahrain GP (high deg)          — VER, 57 laps
+    Singapore GP (street)          — NOR, 62 laps
+    Belgian GP (long lap, high deg)— PER, 44 laps  [2023 used; 2024 in test set]
+    Australian GP (mixed)          — SAI, 57 laps
+
+    Assertions per circuit:
+    - Race time within ±5% of rival reference time
+    - Polesitter on 1-stop finishes P1–P10
 
 CLI:
     python -m pitiq.envs.test_sandbox_manual
@@ -20,9 +27,10 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import dataclass
 from typing import Callable
 
-from pitiq.envs.sandbox import SandboxRaceEnv
+from pitiq.envs.sandbox import SandboxRaceEnv, load_circuit_rival_profile, rival_reference_time
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -30,9 +38,50 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+_TOLERANCE_MONZA   = 0.03   # ±3% for Monza single-circuit checks
+_TOLERANCE_MULTI   = 0.05   # ±5% for 5-circuit checks
 
-_CONFIG = {
+
+# ── Strategy runner ────────────────────────────────────────────────────────────
+
+def _run_strategy(
+    name: str,
+    config: dict,
+    pit_fn: Callable[[int, str], int],
+    verbose: bool = False,
+) -> dict:
+    env = SandboxRaceEnv()
+    obs, _ = env.reset(options=config)
+    n_pits, terminated = 0, False
+    last_info: dict = {}
+    while not terminated:
+        action = pit_fn(env._lap_num, env._compound)
+        obs, _, terminated, _, last_info = env.step(action)
+        if last_info["pit_this_lap"]:
+            n_pits += 1
+        if verbose:
+            print(env.render())
+    env.close()
+    return {
+        "name":                   name,
+        "total_time":             last_info["cumulative_race_time"],
+        "final_position":         last_info["position"],
+        "n_pits":                 n_pits,
+        "two_compound_satisfied": not last_info["violated_two_compound_rule"],
+        "violated_rule":          last_info["violated_two_compound_rule"],
+    }
+
+
+def _check(desc: str, passed: bool, detail: str) -> bool:
+    status = "PASS ✓" if passed else "FAIL ✗"
+    print(f"  [{status}] {desc}")
+    print(f"          {detail}")
+    return passed
+
+
+# ── Part 1: Monza 4-strategy test ─────────────────────────────────────────────
+
+_MONZA_CONFIG = {
     "circuit":            "Italian Grand Prix",
     "driver":             "VER",
     "year":               2025,
@@ -43,227 +92,190 @@ _CONFIG = {
     "two_compound_rule_enforced": True,
 }
 
-_TOLERANCE = 0.03                        # ±3% of rival-baseline reference
 
-
-# ── Strategy helpers ───────────────────────────────────────────────────────────
-
-def _run_strategy(
-    name: str,
-    pit_fn: Callable[[int, str], int],
-    verbose: bool = False,
-) -> dict:
-    """Run a full race using pit_fn(lap_num, compound) → action.
-
-    Returns summary dict with: name, total_time, final_position, n_pits,
-    two_compound_satisfied, violated_rule, lap_times.
-    """
-    env = SandboxRaceEnv(render_mode="ansi" if verbose else None)
-    obs, _ = env.reset(options=_CONFIG)
-
-    n_pits = 0
-    lap_times: list[float] = []
-    terminated = False
-    info: dict = {}
-
-    while not terminated:
-        lap_num  = env._lap_num      # current lap about to run
-        compound = env._compound
-
-        action = pit_fn(lap_num, compound)
-        obs, reward, terminated, truncated, info = env.step(action)
-
-        lap_times.append(info["lap_time"])
-        if info["pit_this_lap"]:
-            n_pits += 1
-
-        if verbose:
-            line = env.render()
-            # render() already prints if mode='ansi'... actually 'ansi' just returns
-            # string, 'human' prints. For verbose, we printed manually:
-            print(env.render())
-
-    env.close()
-
-    two_satisfied = not info.get("violated_two_compound_rule", False)
-    return {
-        "name":                 name,
-        "total_time":           info["cumulative_race_time"],
-        "final_position":       info["position"],
-        "n_pits":               n_pits,
-        "two_compound_satisfied": two_satisfied,
-        "violated_rule":        info.get("violated_two_compound_rule", False),
-        "lap_times":            lap_times,
-    }
-
-
-# ── Strategy definitions ───────────────────────────────────────────────────────
-
-def _strat_1_stop(lap_num: int, compound: str) -> int:
-    """MEDIUM → HARD on lap 25."""
-    if lap_num == 25 and compound == "MEDIUM":
-        return 3  # pit_hard
-    return 0
-
-
-def _strat_no_pit(lap_num: int, compound: str) -> int:
-    return 0
-
-
-def _strat_2_stop(lap_num: int, compound: str) -> int:
-    """MEDIUM → HARD lap 18, HARD → MEDIUM lap 36."""
-    if lap_num == 18 and compound == "MEDIUM":
-        return 3  # pit_hard
-    if lap_num == 36 and compound == "HARD":
-        return 2  # pit_medium
-    return 0
-
-
-def _strat_4_stop(lap_num: int, compound: str) -> int:
-    """4 stops — MEDIUM→HARD→MEDIUM→HARD→MEDIUM at laps 10, 22, 35, 46."""
-    pit_map: dict[tuple[int, str], int] = {
-        (10, "MEDIUM"): 3,   # → HARD
-        (22, "HARD"):   2,   # → MEDIUM
-        (35, "MEDIUM"): 3,   # → HARD
-        (46, "HARD"):   2,   # → MEDIUM
-    }
-    return pit_map.get((lap_num, compound), 0)
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main() -> None:
+def _monza_part1() -> bool:
     print("=" * 70)
-    print("  SandboxRaceEnv — Phase 4.1 Manual Validation")
-    print(f"  Circuit: {_CONFIG['circuit']}  |  Driver: {_CONFIG['driver']}")
-    print(f"  Year: {_CONFIG['year']}  |  Total laps: {_CONFIG['total_laps']}")
+    print("  PART 1 — Monza 4-Strategy Test  (VER, P1, MEDIUM start, 2025)")
     print("=" * 70)
 
-    # ── Strategy 1: Optimal 1-stop (lap-by-lap output) ────────────────────────
-    print("\n>>> Strategy 1: Optimal 1-stop (MEDIUM → HARD lap 25) — full lap log\n")
+    # Strategy 1: full lap-by-lap log
+    print("\n>>> Strategy 1: Optimal 1-stop (MEDIUM → HARD lap 32) — full lap log\n")
     env = SandboxRaceEnv()
-    obs, _ = env.reset(options=_CONFIG)
-    n_pits_s1 = 0
-    last_info: dict = {}
-    terminated = False
-
+    obs, _ = env.reset(options=_MONZA_CONFIG)
+    n_pits, terminated, last_info = 0, False, {}
     while not terminated:
-        lap_num  = env._lap_num
-        compound = env._compound
-        action   = _strat_1_stop(lap_num, compound)
-        obs, reward, terminated, truncated, last_info = env.step(action)
-        if last_info["pit_this_lap"]:
-            n_pits_s1 += 1
+        lap, cpd = env._lap_num, env._compound
+        action = 3 if (lap == 32 and cpd == "MEDIUM") else 0
+        obs, _, terminated, _, last_info = env.step(action)
+        if last_info["pit_this_lap"]: n_pits += 1
         print(env.render())
-
     env.close()
     s1_time = last_info["cumulative_race_time"]
     s1_pos  = last_info["position"]
     s1_rule = not last_info["violated_two_compound_rule"]
+    m, s = divmod(s1_time, 60)
+    print(f"\n  Total: {int(m)}m {s:.3f}s  | P{s1_pos} | {n_pits} stop(s) | Two-compound: {'OK ✓' if s1_rule else 'VIOL ✗'}")
 
-    total_m = int(s1_time // 60)
-    total_s = s1_time % 60
-    print(f"\n  Total race time : {total_m}m {total_s:.3f}s  ({s1_time:.1f}s)")
-    print(f"  Final position  : P{s1_pos}")
-    print(f"  Pit stops       : {n_pits_s1}")
-    print(f"  Two-compound OK : {'YES ✓' if s1_rule else 'NO ✗'}")
-
-    # ── Strategies 2–4 (summary only) ─────────────────────────────────────────
     strategies = [
-        ("Strategy 2: No pit (violates 2-compound rule)", _strat_no_pit),
-        ("Strategy 3: 2-stop (MEDIUM→HARD→MEDIUM laps 18, 36)", _strat_2_stop),
-        ("Strategy 4: Wasteful 4-stop (laps 10, 22, 35, 46)", _strat_4_stop),
+        ("Strategy 2: No pit (violates rule)", lambda l, c: 0),
+        ("Strategy 3: 2-stop (M→H→M laps 18, 40)",
+         lambda l, c: (3 if l == 18 and c == "MEDIUM" else (2 if l == 40 and c == "HARD" else 0))),
+        ("Strategy 4: Wasteful 4-stop (laps 10,22,35,46)",
+         lambda l, c: {(10,"MEDIUM"):3,(22,"HARD"):2,(35,"MEDIUM"):3,(46,"HARD"):2}.get((l,c),0)),
     ]
-
-    results: list[dict] = [
-        {
-            "name": "Strategy 1: Optimal 1-stop (MEDIUM→HARD lap 25)",
-            "total_time": s1_time,
-            "final_position": s1_pos,
-            "n_pits": n_pits_s1,
-            "two_compound_satisfied": s1_rule,
-            "violated_rule": not s1_rule,
-        }
-    ]
-
+    results = [{
+        "name": "Strategy 1: 1-stop (M→H lap 32)",
+        "total_time": s1_time, "final_position": s1_pos,
+        "n_pits": n_pits, "two_compound_satisfied": s1_rule, "violated_rule": not s1_rule,
+    }]
     for label, fn in strategies:
         print(f"\n>>> {label}")
-        r = _run_strategy(label, fn, verbose=False)
+        r = _run_strategy(label, _MONZA_CONFIG, fn)
         results.append(r)
-        m = int(r["total_time"] // 60)
-        s = r["total_time"] % 60
-        print(f"  Total: {m}m {s:.3f}s  ({r['total_time']:.1f}s) | "
-              f"P{r['final_position']} | "
-              f"{r['n_pits']} stop(s) | "
-              f"Two-compound: {'OK ✓' if r['two_compound_satisfied'] else 'VIOLATED ✗'}")
+        m2, s2 = divmod(r["total_time"], 60)
+        print(f"  Total: {int(m2)}m {s2:.3f}s  | P{r['final_position']} | {r['n_pits']} stop(s) | "
+              f"Two-compound: {'OK ✓' if r['two_compound_satisfied'] else 'VIOL ✗'}")
 
-    # ── Comparison table ───────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  RESULTS SUMMARY")
+    print("  SUMMARY")
     print("=" * 70)
-    print(f"  {'Strategy':<48} {'Race time':>10}  {'Pos':>4}  {'Pits':>5}  {'Rule':>8}")
-    print("  " + "-" * 66)
+    print(f"  {'Strategy':<45} {'Time':>12}  {'Pos':>4}  {'Pits':>5}  {'Rule':>8}")
+    print("  " + "-" * 68)
     for r in results:
-        m = int(r["total_time"] // 60)
-        s = r["total_time"] % 60
+        m2, s2 = divmod(r["total_time"], 60)
         rule_str = "OK ✓" if r["two_compound_satisfied"] else "VIOL ✗"
-        print(f"  {r['name']:<48} {m}m{s:06.3f}s  "
-              f"P{r['final_position']:<3}  {r['n_pits']:>4}  {rule_str:>8}")
+        print(f"  {r['name']:<45} {int(m2)}m{s2:06.3f}s  P{r['final_position']:<3}  {r['n_pits']:>4}  {rule_str:>8}")
 
-    # ── Sanity checks ──────────────────────────────────────────────────────────
+    # Reference from rival profile
+    pace_s1, pace_s2, rival_pit = load_circuit_rival_profile(
+        _MONZA_CONFIG["circuit"], _MONZA_CONFIG["year"]
+    )
+    ref = rival_reference_time(_MONZA_CONFIG["circuit"], _MONZA_CONFIG["year"], _MONZA_CONFIG["total_laps"])
+
     print("\n" + "=" * 70)
-    print("  SANITY CHECKS")
+    print("  SANITY CHECKS — PART 1")
     print("=" * 70)
+    s4_time = results[3]["total_time"]
+    checks_passed = True
+    checks_passed &= _check(
+        "1-stop < 4-stop (pit overhead dominates)",
+        s1_time < s4_time,
+        f"1-stop {s1_time:.1f}s vs 4-stop {s4_time:.1f}s",
+    )
+    checks_passed &= _check(
+        "No-pit violates two-compound rule",
+        results[1]["violated_rule"],
+        f"violated={results[1]['violated_rule']}",
+    )
+    checks_passed &= _check(
+        "1-stop satisfies two-compound rule",
+        s1_rule,
+        f"satisfied={s1_rule}",
+    )
+    checks_passed &= _check(
+        f"1-stop within ±{_TOLERANCE_MONZA*100:.0f}% of rival-baseline reference ({ref:.0f}s)",
+        abs(s1_time - ref) / ref <= _TOLERANCE_MONZA,
+        f"sim={s1_time:.1f}s  ref={ref:.1f}s  Δ={abs(s1_time-ref)/ref*100:.1f}%",
+    )
+    checks_passed &= _check(
+        "Polesitter (VER) on 1-stop finishes P1–P10",
+        s1_pos <= 10,
+        f"final_position=P{s1_pos}",
+    )
+    return checks_passed
 
-    s4_time = results[3]["total_time"]   # 4-stop
-    s2_rule = results[1]["violated_rule"]  # no-pit should violate rule
 
-    # Reference: rival baseline pace * total_laps (a no-pit car at mean field pace).
-    # A valid 1-stop race should be within ±3% of this — it costs ~22s net in the
-    # pit lane but fresh tires partially recover that, so the sim time should be
-    # close to (and slightly above) the no-pit rival baseline.
-    from pitiq.envs.sandbox import _get_rival_pace
-    rival_pace  = _get_rival_pace(_CONFIG["circuit"], _CONFIG["year"])
-    reference_s = rival_pace * _CONFIG["total_laps"]
+# ── Part 2: 5-circuit polesitter test ─────────────────────────────────────────
 
-    checks = [
-        (
-            "1-stop < 4-stop (efficiency)",
-            s1_time < s4_time,
-            f"1-stop {s1_time:.1f}s vs 4-stop {s4_time:.1f}s",
-        ),
-        (
-            "No-pit violates two-compound rule",
-            s2_rule,
-            f"violated={s2_rule}",
-        ),
-        (
-            "1-stop two-compound rule satisfied",
-            s1_rule,
-            f"satisfied={s1_rule}",
-        ),
-        (
-            f"1-stop race time within ±{_TOLERANCE*100:.0f}% of rival-baseline "
-            f"({reference_s:.0f}s = {rival_pace:.3f}s × {_CONFIG['total_laps']} laps)",
-            abs(s1_time - reference_s) / reference_s <= _TOLERANCE,
-            f"sim={s1_time:.1f}s  baseline={reference_s:.1f}s  "
-            f"Δ={abs(s1_time - reference_s)/reference_s*100:.1f}%",
-        ),
-    ]
+@dataclass
+class CircuitCase:
+    circuit: str
+    driver:  str
+    year:    int
+    total_laps: int
+    starting_compound: str
+    note: str
+
+
+_CIRCUIT_CASES = [
+    CircuitCase("Italian Grand Prix",   "PIA", 2024, 53, "MEDIUM", "Monza — low deg"),
+    CircuitCase("Bahrain Grand Prix",   "VER", 2024, 57, "SOFT",   "Bahrain — high deg"),
+    CircuitCase("Singapore Grand Prix", "NOR", 2024, 62, "MEDIUM", "Singapore — street"),
+    CircuitCase("Belgian Grand Prix",   "PER", 2023, 44, "SOFT",   "Belgian — long lap  [2023; 2024 in test set]"),
+    CircuitCase("Australian Grand Prix","SAI", 2024, 57, "MEDIUM", "Australian — mixed"),
+]
+
+
+def _multi_circuit_part2() -> bool:
+    print("\n" + "=" * 70)
+    print("  PART 2 — 5-Circuit Polesitter Test  (1-stop at rival median pit lap)")
+    print("=" * 70)
 
     all_passed = True
-    for desc, passed, detail in checks:
-        status = "PASS ✓" if passed else "FAIL ✗"
-        print(f"  [{status}] {desc}")
-        print(f"          {detail}")
-        if not passed:
-            all_passed = False
+    for case in _CIRCUIT_CASES:
+        _, _, median_pit = load_circuit_rival_profile(case.circuit, case.year)
+        ref = rival_reference_time(case.circuit, case.year, case.total_laps)
 
-    print()
-    if all_passed:
-        print("  All sanity checks passed ✓")
+        config = {
+            "circuit":           case.circuit,
+            "driver":            case.driver,
+            "year":              case.year,
+            "total_laps":        case.total_laps,
+            "starting_position": 1,
+            "starting_compound": case.starting_compound,
+            "weather":           {},
+            "two_compound_rule_enforced": True,
+        }
+
+        # Determine pit target compound (opposite of starting)
+        pit_action = 2 if case.starting_compound == "SOFT" else 3   # SOFT → MEDIUM, else → HARD
+
+        def make_pit_fn(pit_lap: int, start_cpd: str, action: int) -> Callable[[int, str], int]:
+            def fn(lap: int, cpd: str) -> int:
+                return action if (lap == pit_lap and cpd == start_cpd) else 0
+            return fn
+
+        # Apply a 40% floor so VSC/SC-biased median pit laps don't create unrealistic
+        # 40+ lap second stints in validation. The env itself still stores the historical
+        # median; this is a test-strategy choice only.
+        ego_pit = max(median_pit, int(case.total_laps * 0.40))
+        pit_fn = make_pit_fn(ego_pit, case.starting_compound, pit_action)
+        r = _run_strategy(f"{case.circuit} {case.year}", config, pit_fn)
+
+        m, s = divmod(r["total_time"], 60)
+        delta_pct = abs(r["total_time"] - ref) / ref * 100
+
+        print(f"\n  {case.note}")
+        print(f"    Driver: {case.driver}  |  Median pit: {median_pit} → test pit: {ego_pit}  |  Start: {case.starting_compound}")
+        print(f"    Rival ref: {ref:.0f}s  |  Sim: {r['total_time']:.1f}s ({int(m)}m{s:06.3f}s)  |  Δ{delta_pct:.1f}%")
+        print(f"    Final position: P{r['final_position']}  |  Stops: {r['n_pits']}")
+
+        ok_time = abs(r["total_time"] - ref) / ref <= _TOLERANCE_MULTI
+        ok_pos  = r["final_position"] <= 10
+
+        if not ok_time:
+            print(f"    [FAIL ✗] Race time outside ±{_TOLERANCE_MULTI*100:.0f}% of reference")
+            all_passed = False
+        if not ok_pos:
+            print(f"    [FAIL ✗] Finished P{r['final_position']} — outside top 10")
+            all_passed = False
+        if ok_time and ok_pos:
+            print(f"    [PASS ✓] Within ±{_TOLERANCE_MULTI*100:.0f}% of reference  |  P{r['final_position']} (top-10)")
+
+    return all_passed
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    part1_ok = _monza_part1()
+    part2_ok = _multi_circuit_part2()
+
+    print("\n" + "=" * 70)
+    if part1_ok and part2_ok:
+        print("  ALL CHECKS PASSED ✓")
     else:
-        print("  One or more checks FAILED — review output above")
+        print("  SOME CHECKS FAILED ✗ — review output above")
         sys.exit(1)
 
 

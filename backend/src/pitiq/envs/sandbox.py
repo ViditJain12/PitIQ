@@ -154,6 +154,26 @@ def rival_reference_time(circuit: str, year: int, total_laps: int) -> float:
     return pace_s1 * pit_lap + _PIT_LOSS_S + pace_s2 * (total_laps - pit_lap)
 
 
+# ── Reward logger ──────────────────────────────────────────────────────────────
+
+class RewardLogger:
+    """Records per-step reward components for validation. Disabled by default."""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+        self.records: list[dict] = []
+
+    def reset(self) -> None:
+        self.records.clear()
+
+    def log(self, lap: int, **components: float) -> None:
+        if self.enabled:
+            self.records.append({"lap": lap, **components})
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame(self.records)
+
+
 # ── Environment ────────────────────────────────────────────────────────────────
 
 class SandboxRaceEnv(gym.Env):
@@ -164,11 +184,12 @@ class SandboxRaceEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "ansi"]}
 
-    def __init__(self, render_mode: str | None = None) -> None:
+    def __init__(self, render_mode: str | None = None, log_rewards: bool = False) -> None:
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
             raise ValueError(f"Unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
+        self.reward_logger = RewardLogger(enabled=log_rewards)
 
         # Observation space
         low = np.array([
@@ -212,7 +233,9 @@ class SandboxRaceEnv(gym.Env):
         self._tire_age:   int   = 1   # laps on current set (1 = brand new)
         self._stint_num:  int   = 1
         self._fuel_kg:    float = _INITIAL_FUEL_KG
-        self._position:   int   = 10
+        self._position:      int   = 10
+        self._prev_position: int   = 10   # position at start of previous lap
+        self._curr_position: int   = 10   # position at end of previous lap
         self._cum_time:   float = 0.0
         self._has_2nd:    bool  = False
         self._used_cpds:  set[str] = set()
@@ -255,20 +278,23 @@ class SandboxRaceEnv(gym.Env):
         self._weather     = dict(cfg.get("weather", {}))
         self._two_compound_rule = bool(cfg.get("two_compound_rule_enforced", True))
 
-        self._lap_num    = 1
-        self._compound   = start_cpd
-        self._start_cpd  = start_cpd
-        self._tire_age   = 1
-        self._stint_num  = 1
-        self._fuel_kg    = _INITIAL_FUEL_KG
-        self._position   = start_pos
-        self._cum_time   = 0.0
-        self._has_2nd    = False
-        self._used_cpds  = {start_cpd}
-        self._violated_rule = False
-        self._last_lap_time = 0.0
-        self._last_pit      = False
+        self._lap_num        = 1
+        self._compound       = start_cpd
+        self._start_cpd      = start_cpd
+        self._tire_age       = 1
+        self._stint_num      = 1
+        self._fuel_kg        = _INITIAL_FUEL_KG
+        self._position       = start_pos
+        self._prev_position  = start_pos
+        self._curr_position  = start_pos
+        self._cum_time       = 0.0
+        self._has_2nd        = False
+        self._used_cpds      = {start_cpd}
+        self._violated_rule  = False
+        self._last_lap_time  = 0.0
+        self._last_pit       = False
         self._last_completed_lap = 0
+        self.reward_logger.reset()
 
         # Rival 1-stop profile for this circuit/year
         pace_s1, pace_s2, rival_pit_lap = load_circuit_rival_profile(
@@ -311,8 +337,11 @@ class SandboxRaceEnv(gym.Env):
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self.action_space.contains(action), f"Invalid action: {action}"
-        completed_lap = self._lap_num
+        original_action = action          # capture before possible reassignment
+        completed_lap   = self._lap_num
         action_was_invalid = False
+        lap_compound    = self._compound  # compound used this lap (before any pit)
+        tire_age_this_lap = self._tire_age
 
         # (a) Validate — pitting into the same compound is illegal, treat as stay
         if action in _ACTION_COMPOUND:
@@ -372,6 +401,7 @@ class SandboxRaceEnv(gym.Env):
         # (f) Update position via cumulative-time rank against pitting rivals.
         #     Rivals run pace_s1 until their pit lap, absorb 22s on that lap,
         #     then run pace_s2 for the remainder.
+        prev_position = self._position
         if completed_lap < self._rival_pit_lap:
             rival_this_lap = self._rival_pace_s1
         elif completed_lap == self._rival_pit_lap:
@@ -381,22 +411,70 @@ class SandboxRaceEnv(gym.Env):
         self._rival_cum += rival_this_lap
         n_ahead = int(np.sum(self._rival_cum < self._cum_time))
         self._position  = n_ahead + 1
+        curr_position   = self._position
+
+        self._prev_position = prev_position
+        self._curr_position = curr_position
 
         # Cache for render / info
         self._last_lap_time      = lap_time
         self._last_pit           = pit_this_lap
         self._last_completed_lap = completed_lap
 
-        # (g) Reward placeholder — Phase 4.2
-        reward = -lap_time
-
-        # (h) Terminal / truncated
+        # (g) Terminal / truncated
         terminated = self._lap_num > self._total_laps
         truncated  = False
 
         if terminated and self._two_compound_rule:
             dry_used = self._used_cpds & {"SOFT", "MEDIUM", "HARD"}
             self._violated_rule = len(dry_used) < 2
+
+        # (h) Reward
+        position_delta    = prev_position - curr_position   # positive = overtake
+        position_reward   = position_delta * 0.5
+        pit_cost          = -0.05 if original_action != 0 else 0.0
+        cliff_penalty     = -0.10 * max(0, laps_past_cliff)
+        invalid_action_penalty = -2.0 if action_was_invalid else 0.0
+
+        # Pace reward: dense per-lap signal vs rival baseline (rival_this_lap from step f).
+        # lap_time includes the 22s pit cost so both sides are on the same footing.
+        pace_delta_s = rival_this_lap - lap_time
+        pace_reward  = pace_delta_s * 0.05
+
+        step_reward = (
+            position_reward
+            + pit_cost
+            + cliff_penalty
+            + invalid_action_penalty
+            + pace_reward
+        )
+
+        terminal_pos_reward  = 0.0
+        terminal_rule_reward = 0.0
+        if terminated:
+            terminal_pos_reward  = -curr_position * 2.0
+            terminal_rule_reward = 10.0 if not self._violated_rule else -100.0
+            step_reward += terminal_pos_reward + terminal_rule_reward
+
+        self.reward_logger.log(
+            lap=completed_lap,
+            action=float(original_action),
+            compound=lap_compound,
+            tire_age=float(tire_age_this_lap),
+            laps_past_cliff=float(laps_past_cliff),
+            position_before=float(prev_position),
+            position_after=float(curr_position),
+            position_delta=float(position_delta),
+            position_reward=position_reward,
+            pit_cost=pit_cost,
+            cliff_penalty=cliff_penalty,
+            invalid_action_penalty=invalid_action_penalty,
+            pace_delta_s=pace_delta_s,
+            pace_reward=pace_reward,
+            terminal_pos_reward=terminal_pos_reward,
+            terminal_rule_reward=terminal_rule_reward,
+            step_reward=step_reward,
+        )
 
         # (i) Info
         info: dict[str, Any] = {
@@ -415,7 +493,7 @@ class SandboxRaceEnv(gym.Env):
         if self.render_mode == "human":
             self.render()
 
-        return self._obs(), reward, terminated, truncated, info
+        return self._obs(), step_reward, terminated, truncated, info
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -442,6 +520,21 @@ class SandboxRaceEnv(gym.Env):
             laps_past_cliff,
             float(int(self._has_2nd)),
         ], dtype=np.float32)
+
+    def _rival_baseline_lap_time_for_lap(self, lap: int) -> float:
+        """Expected rival 1-stop lap time for race lap `lap`.
+
+        Mirrors the per-lap rival logic in step() so callers can query the
+        baseline without stepping the env. Use `rival_this_lap` inside step()
+        directly (already computed) to avoid calling this with the post-increment
+        self._lap_num.
+        """
+        if lap < self._rival_pit_lap:
+            return self._rival_pace_s1
+        elif lap == self._rival_pit_lap:
+            return self._rival_pace_s1 + _PIT_LOSS_S
+        else:
+            return self._rival_pace_s2
 
     # ── render ─────────────────────────────────────────────────────────────────
 

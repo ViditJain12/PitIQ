@@ -7,8 +7,8 @@ Full 20-car grid where:
   - Lap times predicted per car via the styled XGBoost model (Phase 3.2).
   - Position updated from cumulative race time (+ overtaking friction in Part 3).
 
-Observation space (13 dims, float32) — same layout as SandboxRaceEnv.
-Will expand to ~20 dims in Phase 4.5.3 once rival-gap context is added.
+Observation space (25 dims, float32): 13 ego-state dims (same as SandboxRaceEnv)
++ 12 rival-context dims added in Phase 4.5.3 (gaps, compound, tire age, style flags).
 
 Action space (Discrete 4):
     0 = stay   1 = pit_soft   2 = pit_medium   3 = pit_hard
@@ -232,7 +232,7 @@ class GridRaceEnv(gym.Env):
 
     Part 2: step() with lap times, cumulative time, naive position sort.
     Part 3: rival_pit_policy integration + overtaking friction.
-    Phase 4.5.3: obs space expanded with rival-gap context.
+    Phase 4.5.3: obs space expanded to 25 dims with rival-gap context (complete).
     """
 
     metadata = {"render_modes": ["human", "ansi"]}
@@ -243,8 +243,9 @@ class GridRaceEnv(gym.Env):
             raise ValueError(f"Unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
 
-        # Observation space: 13 dims (same layout as SandboxRaceEnv).
-        # Phase 4.5.3 will extend with rival-gap features.
+        # Observation space: 25 dims.
+        # [0-12]  ego state  (same layout as SandboxRaceEnv)
+        # [13-24] rival context (Phase 4.5.3)
         low = np.array([
             0.0,                          # [0]  lap_fraction
             0.0, 0.0, 0.0, 0.0, 0.0,     # [1-5] compound one-hot (S/M/H/I/W)
@@ -255,6 +256,19 @@ class GridRaceEnv(gym.Env):
             0.0,                          # [10] laps_remaining
             0.0,                          # [11] laps_past_cliff
             0.0,                          # [12] has_used_2nd_compound
+            # rival context ──────────────
+            0.0,                          # [13] gap_to_rival_ahead_s
+            0.0,                          # [14] rival_ahead_compound_index
+            0.0,                          # [15] rival_ahead_tire_age
+            0.0,                          # [16] rival_ahead_overall_pace_rank
+            0.0,                          # [17] rival_ahead_tire_saving_coef
+            0.0,                          # [18] gap_to_rival_behind_s
+            0.0,                          # [19] rival_behind_compound_index
+            0.0,                          # [20] rival_behind_tire_age
+            0.0,                          # [21] rival_behind_overall_pace_rank
+            0.0,                          # [22] rival_behind_tire_saving_coef
+            0.0,                          # [23] undercut_window_open
+            0.0,                          # [24] defending_against_undercut
         ], dtype=np.float32)
 
         high = np.array([
@@ -267,9 +281,22 @@ class GridRaceEnv(gym.Env):
             100.0,
             50.0,
             1.0,
+            # rival context ──────────────
+            30.0,                         # gap clipped to 30 s
+            4.0,                          # compound index 0–4
+            50.0,                         # tire_age clipped
+            33.0,                         # overall_pace_rank (1–33 range in data)
+            2.0,                          # tire_saving_coef (near 1.0; generous bound)
+            30.0,
+            4.0,
+            50.0,
+            33.0,
+            2.0,
+            1.0,                          # undercut flag
+            1.0,                          # defending flag
         ], dtype=np.float32)
 
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+        self.observation_space = spaces.Box(low=low, high=high, shape=(25,), dtype=np.float32)
         self.action_space = spaces.Discrete(4)
 
         # Race config — populated by reset()
@@ -686,10 +713,79 @@ class GridRaceEnv(gym.Env):
                 for c in cars_overtaken:
                     c.cumulative_race_time += 0.3  # 0.3 s defending cost
 
+    def _compute_rival_context(self) -> np.ndarray:
+        """Return the 12-dim rival-context slice (obs indices 13-24).
+
+        Feature layout:
+          13: gap_to_rival_ahead_s          — seconds ego trails car directly ahead, [0,30]
+          14: rival_ahead_compound_index    — SOFT=0, MEDIUM=1, HARD=2, INT=3, WET=4
+          15: rival_ahead_tire_age          — laps on current set, clipped to [0,50]
+          16: rival_ahead_overall_pace_rank — from driver_styles, [0,33]
+          17: rival_ahead_tire_saving_coef  — from driver_styles, [0,2]
+          18-22: same fields for rival directly behind
+          23: undercut_window_open  — 1 if gap_ahead<1.5s AND rival_ahead older tires
+          24: defending_against_undercut — 1 if gap_behind<1.5s AND rival_behind fresher
+
+        Sentinel values when no rival exists (ego P1 → no ahead; ego P20 → no behind):
+          gap=30.0, compound_index=0, tire_age=0, pace_rank=33.0, tire_saving_coef=0.5
+          Both strategy flags = 0.0 in edge cases.
+        """
+        ego = self._ego
+        pos_map: dict[int, Car] = {car.current_position: car for car in self._grid}
+        rival_ahead  = pos_map.get(ego.current_position - 1)
+        rival_behind = pos_map.get(ego.current_position + 1)
+
+        def _sv(sv: dict, key: str, default: float) -> float:
+            v = float(sv.get(key, default))
+            return default if np.isnan(v) else v
+
+        # ── Rival ahead ──────────────────────────────────────────────────────
+        if rival_ahead is not None:
+            gap_ahead   = float(np.clip(
+                ego.cumulative_race_time - rival_ahead.cumulative_race_time, 0.0, 30.0
+            ))
+            cmp_ahead   = float(_COMPOUND_IDX.get(rival_ahead.compound, 0))
+            age_ahead   = float(min(rival_ahead.tire_age, 50))
+            rank_ahead  = _sv(rival_ahead.style_vector, "overall_pace_rank", 33.0)
+            tsave_ahead = _sv(rival_ahead.style_vector, "tire_saving_coef",  0.5)
+        else:
+            gap_ahead, cmp_ahead, age_ahead, rank_ahead, tsave_ahead = 30.0, 0.0, 0.0, 33.0, 0.5
+
+        # ── Rival behind ─────────────────────────────────────────────────────
+        if rival_behind is not None:
+            gap_behind   = float(np.clip(
+                rival_behind.cumulative_race_time - ego.cumulative_race_time, 0.0, 30.0
+            ))
+            cmp_behind   = float(_COMPOUND_IDX.get(rival_behind.compound, 0))
+            age_behind   = float(min(rival_behind.tire_age, 50))
+            rank_behind  = _sv(rival_behind.style_vector, "overall_pace_rank", 33.0)
+            tsave_behind = _sv(rival_behind.style_vector, "tire_saving_coef",  0.5)
+        else:
+            gap_behind, cmp_behind, age_behind, rank_behind, tsave_behind = 30.0, 0.0, 0.0, 33.0, 0.5
+
+        # ── Strategy flags ───────────────────────────────────────────────────
+        undercut_open = 1.0 if (
+            rival_ahead is not None
+            and gap_ahead < 1.5
+            and rival_ahead.tire_age > ego.tire_age
+        ) else 0.0
+
+        defending = 1.0 if (
+            rival_behind is not None
+            and gap_behind < 1.5
+            and rival_behind.tire_age < ego.tire_age
+        ) else 0.0
+
+        return np.array([
+            gap_ahead, cmp_ahead, age_ahead, rank_ahead, tsave_ahead,
+            gap_behind, cmp_behind, age_behind, rank_behind, tsave_behind,
+            undercut_open, defending,
+        ], dtype=np.float32)
+
     def _obs(self) -> np.ndarray:
-        """Build the 13-dim ego observation vector."""
+        """Build the 25-dim ego observation vector."""
         if self._ego is None:
-            return np.zeros(13, dtype=np.float32)
+            return np.zeros(25, dtype=np.float32)
 
         ego = self._ego
         compound_oh = np.zeros(5, dtype=np.float32)
@@ -703,7 +799,7 @@ class GridRaceEnv(gym.Env):
             min(1.0, (self._lap_num - 1) / max(1, self._total_laps))
         )
 
-        return np.array([
+        base = np.array([
             lap_fraction,
             *compound_oh,
             float(ego.tire_age),
@@ -714,6 +810,8 @@ class GridRaceEnv(gym.Env):
             laps_past_cliff,
             float(int(ego.has_used_2nd_compound)),
         ], dtype=np.float32)
+
+        return np.concatenate([base, self._compute_rival_context()])
 
     # ── render ─────────────────────────────────────────────────────────────────
 

@@ -507,6 +507,50 @@ Race-state features (tire_age, laps_remaining, EventName one-hots) dominate the 
 
 ---
 
+## Phase 4.5.3 — Rival-Aware 25-Dim Observation Space (2026-05-03)
+**Built:**
+- Expanded `GridRaceEnv` ego observation from 13-dim to 25-dim by adding 12 rival-context features
+- New dims [13-17] — rival immediately ahead: `gap_to_rival_ahead_s` (clipped [0, 30]), `rival_ahead_cmp_idx` (integer compound index), `rival_ahead_tire_age` (capped at 50), `rival_ahead_pace_rank` (from style vector), `rival_ahead_tire_save` (from style vector)
+- New dims [18-22] — rival immediately behind: same 5 features mirrored
+- New dims [23-24] — strategy flags: `undercut_window_open` (gap_ahead < 1.5s AND rival_ahead older tires than ego), `defending_against_undercut` (gap_behind < 1.5s AND rival_behind fresher tires than ego)
+- Sentinel values for edge positions: P1 ego (no rival ahead) → gap=30.0, cmp=0, tire_age=0, pace_rank=33.0, tire_saving=0.5; P20 ego (no rival behind) → same sentinels
+- `_compute_rival_context()` method with NaN-safe `_sv()` helper for drivers with missing style-vector entries
+- Updated `observation_space` bounds in `__init__`: shape (25,), low/high covering all 12 new dims
+- `test_grid_part5.py` — labeled 25-dim obs printer at laps 1/10/17/19/30/56 (VER P1) + lap 5 (PER P4)
+
+**Validation — 16/16 assertions pass:**
+- Lap 1: P1 sentinel active (gap_ahead=30.0), gap_behind=0.10s (LEC close behind at race start) ✓
+- Lap 10: gap_behind=1.01s (VER opened gap to LEC slightly over 10 laps) ✓
+- Lap 17: undercut_window_open=0.0 (VER P1, no rival ahead to undercut) ✓
+- Lap 19: ego tire_age=2 (fresh HARD post-pit), defending=0.0 (ego fresher than rivals behind) ✓
+- Lap 30: rival_ahead sentinel active (VER stays P1 whole race — age=0 is the correct sentinel) ✓
+- Lap 56: gap_behind=16.0s (VER 16s clear at race end — realistic Bahrain spread) ✓
+- Race 2 (PER P4, lap 5): both gaps populated (RUS 1.04s ahead, SAI 0.88s behind), no sentinels active ✓
+- Observation space shape = (25,) ✓
+
+**Key implementation notes:**
+- `_compute_rival_context()` builds a `pos_map = {position: Car}` lookup each call — O(n) per lap but clean; 20-car grid makes this negligible
+- Integer compound index (not one-hot) for rival compounds — keeps obs compact while preserving compound identity; PPO embedding layer will learn the mapping
+- `gap_to_rival_ahead_s = ego.cumulative_race_time - rival_ahead.cumulative_race_time` — positive = ego is behind in time (rival ahead is faster)
+- `gap_to_rival_behind_s = rival_behind.cumulative_race_time - ego.cumulative_race_time` — positive = rival behind is slower
+- Both clipped to [0, 30] — 30.0 is a "safe" out-of-range sentinel that also signals "very large gap" to the agent
+
+**Design rationale — undercut/defending flags pre-computed:**
+Rather than leaving the agent to derive the undercut signal from raw gap + tire age features, the flags are pre-computed with clean semantics (1.5s threshold, tire age comparison). This reduces the RL learning burden: the agent can learn "if undercut_window_open=1, pitting now is likely profitable" without first having to discover that (gap < 1.5) AND (rival_age > ego_age) is the relevant conjunction. Raw features are also present for any more nuanced policy the agent discovers.
+
+**Worked well:**
+- NaN-safe `_sv()` helper cleanly handles the ~3 drivers in `driver_styles.parquet` with NaN style features (e.g., `wet_skill_delta` for HAD)
+- Sentinel scheme (large round numbers) is learnable: the agent will quickly discover that gap=30.0 means "no rival in this direction," which is a simple signal to exploit
+
+**Pain points:**
+- Lap 30 assertion initially assumed VER would not be P1 (checking rival_ahead_tire_age in [1, 49]). VER stayed P1 the entire race, so sentinel (age=0) was correct. Assertion updated to conditional: check age if gap<30.0, else verify sentinel=0.
+
+**Open questions:**
+- Phase 5 PPO: will `undercut_window_open` and `defending_against_undercut` appear early in value-function feature importance? If so, validates the pre-computation design.
+- Phase 4.5.1 rival policy used only ego-state features. Now that `GridRaceEnv` computes per-car gaps, could we retrain the rival policy with gap-to-rival features for a second-pass AUC lift (target: >0.80)? Deferred; current AUC=0.777 is sufficient for Phase 5.
+
+---
+
 ## Phase 4.5.2 — GridRaceEnv (2026-05-02)
 **Built:**
 - `pitiq.envs.grid.GridRaceEnv` — 20-car Gymnasium multi-agent race environment for Optimizer Mode. 4-part incremental implementation:

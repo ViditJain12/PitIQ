@@ -37,7 +37,8 @@ from pitiq.ml.compound_constants import (
     COMPOUND_FRESH_TIRE_OFFSET_S,
 )
 from pitiq.ml.predict import predict_lap_time
-from pitiq.ml.rival_policy import predict_pit_probability  # noqa: F401 — used in Part 3
+from pitiq.ml.rival_policy import predict_pit_probability
+from pitiq.envs.grid_constants import OVERTAKING_DIFFICULTY
 
 logger = logging.getLogger(__name__)
 
@@ -184,24 +185,7 @@ def _circuit_rival_baseline(circuit: str, year: int) -> tuple[float, float, int]
     )
 
 
-# ── Rival pit decision helpers (TEMPORARY — replaced by rival_pit_policy in Part 3) ──
-
-def _placeholder_rival_pit_decision(rival: Car, laps_remaining: int) -> bool:
-    """Deterministic cliff-threshold pit rule.
-
-    TEMPORARY PLACEHOLDER — Part 3 replaces this with predict_pit_probability()
-    from the Phase 4.5.1 XGBClassifier for stochastic, style-aware decisions.
-
-    Rules (in order):
-      1. Pit ~3 laps before the compound cliff if race isn't nearly over.
-      2. Force pit if 2-compound rule not satisfied and race is ending.
-    """
-    cliff_lap = COMPOUND_CLIFF_LAP.get(rival.compound, 999)
-    if rival.tire_age >= cliff_lap - 3 and laps_remaining > 5:
-        return True
-    if not rival.has_used_2nd_compound and laps_remaining < 8:
-        return True
-    return False
+# ── Rival pit helpers ─────────────────────────────────────────────────────────
 
 
 def _rival_pit_compound_choice(rival: Car, laps_remaining: int) -> str:
@@ -316,6 +300,8 @@ class GridRaceEnv(gym.Env):
         self._infer_track: float | None = None
         self._infer_hum:   float | None = None
 
+        self._rng: np.random.Generator = np.random.default_rng()
+
         self._styles_df: pd.DataFrame = _load_driver_styles()
 
     # ── reset ──────────────────────────────────────────────────────────────────
@@ -342,6 +328,7 @@ class GridRaceEnv(gym.Env):
             two_compound_rule_enforced  : bool (default True)
         """
         super().reset(seed=seed)
+        self._rng = self.np_random
         cfg = options or {}
 
         required = [
@@ -482,14 +469,12 @@ class GridRaceEnv(gym.Env):
         )
         prev_ego_pos = self._prev_ego_position
 
-        # (b) Rival pit decisions — TEMPORARY cliff-threshold placeholder.
-        #     Part 3 replaces with predict_pit_probability() for stochastic,
-        #     style-aware, calibrated decisions.
+        # (b) Rival pit decisions via behavior-cloned policy (Phase 4.5.1 XGBClassifier).
         rival_new_compound: dict[str, str | None] = {}
         for car in self._grid:
             if car is ego:
                 continue
-            if _placeholder_rival_pit_decision(car, laps_remaining):
+            if self._rival_pit_decision(car, laps_remaining):
                 rival_new_compound[car.driver] = _rival_pit_compound_choice(
                     car, laps_remaining
                 )
@@ -555,8 +540,18 @@ class GridRaceEnv(gym.Env):
             car.fuel_estimate_kg     = max(0.0, car.fuel_estimate_kg - _FUEL_BURN_KG_PER_LAP)
             car.cumulative_race_time += lap_times[car.driver]
 
-        # (f) Naive position sort — cumulative_race_time ascending → position 1-20.
-        #     No overtaking friction yet; Part 3 adds circuit-scaled resistance.
+        # Capture pre-step positions for overtaking friction (before naive sort)
+        prev_positions = {car.driver: car.current_position for car in self._grid}
+
+        # (f) Naive position sort — cumulative_race_time ascending → position 1-20
+        self._grid.sort(key=lambda c: c.cumulative_race_time)
+        for rank, car in enumerate(self._grid, start=1):
+            car.current_position = rank
+
+        # Apply overtaking friction; clamp on-track gains, pit swaps exempt
+        self._apply_overtaking_friction(prev_positions, pitted_drivers)
+
+        # Re-sort after friction adjustments to resolve any position conflicts
         self._grid.sort(key=lambda c: c.cumulative_race_time)
         for rank, car in enumerate(self._grid, start=1):
             car.current_position = rank
@@ -625,6 +620,71 @@ class GridRaceEnv(gym.Env):
             return self._baseline_pace_s1 + _PIT_LOSS_S
         else:
             return self._baseline_pace_s2
+
+    def _rival_pit_decision(self, rival: Car, laps_remaining: int) -> bool:
+        """Sample a pit decision for a rival from the behavior-cloned policy."""
+        pit_prob = predict_pit_probability(
+            driver        = rival.driver,
+            circuit       = self._circuit,
+            compound      = rival.compound,
+            tire_age      = rival.tire_age,
+            laps_remaining = laps_remaining,
+            position      = rival.current_position,
+            stint_number  = rival.stint_number,
+            fuel_estimate = rival.fuel_estimate_kg,
+            is_wet        = bool(self._weather.get("is_wet", False)),
+            track_temp    = float(
+                self._weather.get("track_temp") or self._infer_track or 30.0
+            ),
+            year          = self._year,
+        )
+        rival_pits = bool(self._rng.random() < pit_prob)
+
+        # Force pit if 2-compound rule is unsatisfied and the race is ending
+        if not rival.has_used_2nd_compound and laps_remaining < 8:
+            rival_pits = True
+
+        # Never pit on the final 2 laps — too late to recover time
+        if laps_remaining <= 2:
+            rival_pits = False
+
+        return rival_pits
+
+    def _apply_overtaking_friction(
+        self,
+        prev_positions: dict[str, int],
+        cars_that_pitted: set[str],
+    ) -> None:
+        """Clamp on-track position gains to circuit overtaking difficulty.
+
+        Pit-cycle swaps are exempt — a car that pitted may drop any number
+        of positions as it exits the pit lane.  Defending cars absorb a small
+        time cost (0.3 s) to keep cumulative_race_time consistent with the
+        clamped positions after the subsequent re-sort.
+        """
+        max_gain = OVERTAKING_DIFFICULTY.get(
+            self._circuit, OVERTAKING_DIFFICULTY["DEFAULT"]
+        )
+
+        for car in self._grid:
+            if car.driver in cars_that_pitted:
+                continue  # pitting car can drop any number of positions
+
+            prev_pos         = prev_positions[car.driver]
+            curr_pos         = car.current_position
+            positions_gained = prev_pos - curr_pos  # positive = moved forward
+
+            if positions_gained > max_gain:
+                clamped_position    = prev_pos - int(max_gain)
+                car.current_position = clamped_position
+                # Add defending cost to cars displaced by the clamp
+                cars_overtaken = [
+                    c for c in self._grid
+                    if prev_positions[c.driver] < prev_pos
+                    and c.current_position >= clamped_position
+                ]
+                for c in cars_overtaken:
+                    c.cumulative_race_time += 0.3  # 0.3 s defending cost
 
     def _obs(self) -> np.ndarray:
         """Build the 13-dim ego observation vector."""

@@ -517,10 +517,17 @@ def _run_sanity_checks(
 @lru_cache(maxsize=1)
 def _load_rival_policy() -> tuple[_CalibratedPitModel, list[str], pd.DataFrame]:
     """Load model, feature columns, and driver styles (cached)."""
+    import sys as _sys
     if not _MODEL_PATH.exists():
         raise FileNotFoundError(
             f"Model not found at {_MODEL_PATH} — run: python -m pitiq.ml.rival_policy --train"
         )
+    # Model was pickled when rival_policy ran as __main__, so _CalibratedPitModel
+    # was saved as __main__._CalibratedPitModel.  Inject it into the active
+    # __main__ so joblib/pickle can resolve the reference regardless of caller.
+    _main = _sys.modules.get("__main__")
+    if _main is not None and not hasattr(_main, "_CalibratedPitModel"):
+        _main._CalibratedPitModel = _CalibratedPitModel
     model, feature_columns = joblib.load(_MODEL_PATH)
     styles = pd.read_parquet(_FEATURES_DIR / "driver_styles.parquet")
     return model, feature_columns, styles

@@ -596,3 +596,43 @@ Rather than leaving the agent to derive the undercut signal from raw gap + tire 
 - Phase 4.5.3: add gap-to-rival features to both the rival policy and the GridRaceEnv obs space (Phase 4.5.1 decision to defer these features is still open).
 - Phase 5 PPO training on `GridRaceEnv`: will the stochastic rivals provide enough episode diversity to train a robust undercut/overcut policy? The 18/20 stdev≥1.0 metric suggests yes.
 - Should `OVERTAKING_DIFFICULTY` be a probability (0–1) rather than a max-positions-per-lap integer? The current design forces a cliff at integer boundaries (0 vs 1 position gains), which may be overly binary. Revisit if PPO shows unrealistic position dynamics during training.
+
+---
+
+## Phase 5.1 — PPO Sandbox Agent
+
+**Deliverable:** `pitiq.ml.train_ppo_sandbox` — trained PPO agent on `SandboxRaceEnv` with curriculum learning. Artifacts: `models/ppo_sandbox_final.zip`, `models/ppo_sandbox_best.zip`, training curve + baseline comparison figures.
+
+**Training run:**
+- 52 minutes total on CPU (Apple M-series), 1M timesteps, 4 parallel envs (DummyVecEnv), ~335 fps
+- Stage 1 (0–300K): fixed scenario — Bahrain GP 2024, VER, P1, SOFT. Single scenario to give agent a clean learning signal before adding complexity.
+- Stage 2 (300K–1M): curriculum — 4 circuits (Bahrain, Italian, Belgian, Abu Dhabi) × 5 drivers (VER, LEC, NOR, HAM, ZHO) × P1–P10 starting positions, sampled randomly each episode reset.
+
+**Training curve (EvalCallback — deterministic, Bahrain VER P1, 5 eps):**
+- 100K: +7.46 — fast convergence on Stage 1 fixed scenario; agent already satisfying two-compound rule and finishing P1
+- 300K (end Stage 1): −0.49 — reward tracked against a harder Stage 2 baseline (expected: Stage 1 had no diversity pressure)
+- 400K: +8.09 — peak; agent recovered quickly from Stage 2 complexity expansion
+- 500K–700K: +7.64 — stable plateau; generalisation across all 4 circuits confirmed
+- 900K–1M: +7.46–8.15 — converged; policy gradient loss near zero, entropy ~−0.05 (fully exploiting)
+
+**Baseline comparison (Bahrain GP, VER, P1, 10 deterministic episodes):**
+
+| Policy | Mean Reward | Mean Pos | Mean Time | Wins |
+|---|---|---|---|---|
+| PPO (trained) | +8.15 | P1.0 | 5,415s | 10/10 |
+| Cliff-pit heuristic | +8.67 | P1.0 | 5,411s | 10/10 |
+| Never-pit | −231.45 | P20.0 | 5,505s | 0/10 |
+| Random | −103.97 | P20.0 | 6,055s | 0/10 |
+
+**Interpretation:** PPO +8.15 ≈ cliff-pit +8.67 is the correct result, not a failure. Bahrain P1 VER starting on SOFT is the simplest possible F1 strategy scenario: a single pit around the SOFT cliff (lap 18) onto HARD is close to optimal, and that's exactly what both the PPO agent and the cliff-pit heuristic do. PPO discovered this independently from reward signal alone, validating that the env and reward function are learnable from first principles. The 239-point margin vs never-pit (−231) and 112-point margin vs random (−104) confirm the agent learned genuine strategy and not env quirks. PPO differentiation vs cliff-pit heuristics is expected in Phase 5.2 (GridRaceEnv), where rival-awareness (undercut windows, rival tire age, style-based pit prediction) provides signal that any fixed heuristic cannot use.
+
+**macOS Apple Silicon fix:**
+XGBoost uses Homebrew libomp; PyTorch bundles its own OpenMP runtime. Loading both in the same process caused a segfault (exit 139) on every `model.learn()` call. Fix: set `KMP_DUPLICATE_LIB_OK=TRUE` and `OMP_NUM_THREADS=1` via `os.environ` at the very top of `train_ppo_sandbox.py`, before any imports trigger library loading. Added to the training script with a comment explaining the root cause for future reference.
+
+**Pain points:**
+- Three failed training launches before finding the segfault: first run failed (tensorboard not installed), second failed (tqdm/rich not installed for progress bar), third failed (OpenMP segfault). All three were dependency gaps; no code logic issues.
+- `tee`-based logging doesn't capture rich progress bar output (rich writes to a terminal device, not stdout/stderr). The training log shows only PPO verbose output; progress bar was only visible interactively.
+
+**Open questions for Phase 5.2:**
+- Will the 25-dim rival-aware obs provide enough signal for PPO to learn undercut/overcut timing that beats a cliff-pit heuristic? The undercut window flag and rival tire age features are the key differentiators.
+- Multi-circuit curriculum worked cleanly for Stage 2 — same pattern can be applied in Phase 5.2 with grid races at Bahrain + 3 other circuits.

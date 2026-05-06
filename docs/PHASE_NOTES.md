@@ -817,3 +817,11 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 
 **Open questions:**
 - Phase 6.2 will need to import `SandboxRaceEnv` and the PPO models — watch for the `KMP_DUPLICATE_LIB_OK` / OpenMP conflict when uvicorn forks worker processes. Single-worker mode may be required.
+
+## Phase 6.2 — Sandbox ML inference endpoints (2026-05-06)
+**Built:** 3 POST endpoints: `/api/sandbox/degradation-curve` (XGBoost stint prediction with compound dynamics), `/api/sandbox/simulate` (user-defined strategy through SandboxRaceEnv), `/api/sandbox/recommend` (PPO Sandbox deterministic rollout). 6 new Pydantic schemas. ThreadPoolExecutor(max_workers=4) for sync env execution in async handlers. PPO + XGBoost loaded at startup.
+**Worked well:** lru_cache on `load_model()` means no extra startup cost — just one warm call. PPO.load() is fast (~1s). Thread pool pattern cleanly separates sync env code from async FastAPI handlers. Lambda closures work fine (ThreadPoolExecutor is thread-based, not process-based, so no pickling needed).
+**Pain points:** None significant. KMP_DUPLICATE_LIB_OK=TRUE already set at top of main.py so no OpenMP conflict on startup.
+**Open questions:**
+- Phase 6.3 (optimize endpoint) will need GridRaceEnv + PPO Grid agent — memory usage could be higher. Single-worker uvicorn still recommended.
+- tire_age in lap_by_lap starts at 2 after lap 1 (env increments after step). This is correct env behavior (1-indexed tire age) but may need frontend note.

@@ -364,3 +364,14 @@ laps add noise).
 **Decision:** `gamma=0.99`.
 **Why:** At gamma=0.99, a terminal reward at step 57 is discounted by 0.99^57 ≈ 0.566 — still more than half its face value. At gamma=0.95 (common default), 0.95^57 ≈ 0.054 — only 5% of the terminal reaches back to step 1, making credit assignment for early pit decisions extremely difficult. With the per-step `pace_reward` providing a dense intermediate signal (SNR=7.2×, validated in Phase 4.2), the combination of dense pace signal + high-gamma terminal propagation gives the agent enough gradient to learn that an early pit on lap 18 causes P1 at lap 57.
 **Alternatives considered:** gamma=0.95 (standard default — rejected: too much discounting for a 57-step episode with dominant terminal reward); gamma=1.0 (no discounting — rejected: destabilises PPO value function training on long episodes).
+
+## 2026-05-06 — ThreadPoolExecutor for sync env execution in async FastAPI
+**Context:** SandboxRaceEnv and PPO inference are synchronous (Gymnasium + NumPy + XGBoost). FastAPI endpoints are async. Blocking the event loop with a 57-step env rollout (~200ms) would stall all other requests.
+**Decision:** `ThreadPoolExecutor(max_workers=4)` stored in `app.state.executor`, called via `await loop.run_in_executor(app.state.executor, lambda: ...)`.
+**Why:** Standard pattern for CPU-bound work in async FastAPI. Thread-based (not process-based) so closures/lambdas work without pickling. max_workers=4 matches a typical M-series Mac core count without over-subscribing given XGBoost also uses threads internally.
+**Alternatives considered:** Separate worker process via `ProcessPoolExecutor` — rejected: requires pickling, complicates model sharing, more complex lifecycle management.
+
+## 2026-05-06 — PPO inference at /recommend uses deterministic=True
+**Context:** PPO Sandbox produces stochastic actions by default (samples from learned policy distribution). For a recommendation endpoint, the user expects a single consistent recommendation, not a random sample.
+**Decision:** `ppo_model.predict(obs, deterministic=True)` — takes the argmax of the action distribution rather than sampling.
+**Why:** API users want a reproducible recommendation. Stochastic sampling makes sense during training (exploration) but not for a served endpoint. The deterministic policy is also the stronger one at evaluation time (as confirmed by Phase 5.3 evaluation).

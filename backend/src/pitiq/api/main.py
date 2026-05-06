@@ -1,4 +1,4 @@
-"""PitIQ FastAPI application — Phase 6.1: data/lookup endpoints.
+"""PitIQ FastAPI application — Phase 6.2: data/lookup + sandbox inference endpoints.
 
 Run:
     uvicorn pitiq.api.main:app --reload --port 8000
@@ -6,10 +6,12 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +21,29 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from stable_baselines3 import PPO
 
-from pitiq.api.schemas import CircuitInfo, DriverInfo, HealthResponse, HistoricalRace
+from pitiq.api.schemas import (
+    CircuitInfo,
+    DegradationCurveRequest,
+    DegradationCurveResponse,
+    DriverInfo,
+    HealthResponse,
+    HistoricalRace,
+    LapData,
+    PitStop,
+    PPORecommendRequest,
+    PPORecommendResponse,
+    SimulateRequest,
+    SimulateResponse,
+)
+from pitiq.envs.sandbox import SandboxRaceEnv
+from pitiq.ml.compound_constants import COMPOUND_CLIFF_LAP
+from pitiq.ml.predict import load_model, predict_degradation_curve
 
-_REPO_ROOT = Path(__file__).parents[4]
-_DATA_DIR = _REPO_ROOT / "data" / "features"
+_REPO_ROOT  = Path(__file__).parents[4]
+_DATA_DIR   = _REPO_ROOT / "data" / "features"
+_MODELS_DIR = _REPO_ROOT / "models"
 
 # ── Static lookup tables ──────────────────────────────────────────────────────
 
@@ -163,7 +183,7 @@ async def startup() -> None:
     style_cols = driver_styles.columns.tolist()
     X_raw = driver_styles[style_cols].copy()
     X_filled = X_raw.fillna(X_raw.median())
-    scaler  = StandardScaler()
+    scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X_filled)
     km = KMeans(n_clusters=4, random_state=42, n_init=10)
     labels = km.fit_predict(X_scaled)
@@ -171,10 +191,27 @@ async def startup() -> None:
         code: int(labels[i]) for i, code in enumerate(driver_styles.index)
     }
 
-    app.state.lap_features  = lap_features
-    app.state.driver_styles = driver_styles
-    app.state.circuit_years = circuit_years
-    app.state.cluster_map   = cluster_map
+    # XGBoost model — warms lru_cache; circuit_defaults used for weather fallback
+    _, _, _, xgb_circuit_defaults = load_model()
+
+    # PPO Sandbox agent
+    ppo_sandbox = PPO.load(_MODELS_DIR / "ppo_sandbox_best.zip")
+
+    # Thread pool for synchronous env execution in async handlers
+    executor = ThreadPoolExecutor(max_workers=4)
+
+    app.state.lap_features        = lap_features
+    app.state.driver_styles       = driver_styles
+    app.state.circuit_years       = circuit_years
+    app.state.cluster_map         = cluster_map
+    app.state.xgb_circuit_defaults = xgb_circuit_defaults
+    app.state.ppo_sandbox         = ppo_sandbox
+    app.state.executor            = executor
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    app.state.executor.shutdown(wait=False)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -276,6 +313,138 @@ def _build_results(df_race: pd.DataFrame) -> list[dict]:
     return sorted(rows, key=lambda x: x["position"])
 
 
+def _confidence(circuit_name: str) -> str:
+    """Predict confidence based on number of training seasons for this circuit."""
+    years = app.state.circuit_years.get(circuit_name, [])
+    train_years = [y for y in years if y <= 2024]
+    if len(train_years) >= 3:
+        return "high"
+    elif len(train_years) <= 1:
+        return "low"
+    return "medium"
+
+
+def _weather_for(circuit: str, year: int | None) -> dict:
+    """Best-effort weather lookup: exact (circuit, year) → circuit mean → defaults."""
+    defaults = app.state.xgb_circuit_defaults.get(circuit, {})
+    if year is not None:
+        df = app.state.lap_features
+        sub = df[(df["EventName"] == circuit) & (df["Year"] == year)]
+        if len(sub) >= 5:
+            return {
+                "air_temp":   float(sub["air_temp"].mean()),
+                "track_temp": float(sub["track_temp"].mean()),
+                "humidity":   float(sub["humidity"].mean()),
+                "is_wet":     bool(sub["is_wet"].mode().iloc[0]) if "is_wet" in sub.columns else False,
+            }
+    return {
+        "air_temp":   defaults.get("air_temp",   25.0),
+        "track_temp": defaults.get("track_temp", 35.0),
+        "humidity":   defaults.get("humidity",   50.0),
+        "is_wet":     False,
+    }
+
+
+# ── Sync env runners (executed in thread pool) ────────────────────────────────
+
+def _run_simulate_sync(
+    driver: str,
+    circuit: str,
+    starting_compound: str,
+    starting_position: int,
+    pit_action_map: dict[int, int],
+    total_laps: int,
+    year: int,
+) -> dict:
+    env = SandboxRaceEnv()
+    obs, _ = env.reset(options={
+        "circuit":             circuit,
+        "driver":              driver,
+        "year":                year,
+        "total_laps":          total_laps,
+        "starting_position":   starting_position,
+        "starting_compound":   starting_compound,
+        "two_compound_rule_enforced": True,
+    })
+
+    lap_by_lap: list[dict] = []
+    pit_stops_executed: list[dict] = []
+    lap_num = 1
+    terminated = truncated = False
+    info: dict = {}
+
+    while not (terminated or truncated):
+        action = pit_action_map.get(lap_num, 0)
+        obs, _, terminated, truncated, info = env.step(action)
+        lap_by_lap.append({
+            "lap":      lap_num,
+            "compound": info["compound"],
+            "tire_age": int(info["tire_age"]),
+            "lap_time": round(float(info["lap_time"]), 3),
+            "position": int(info["position"]),
+        })
+        if info.get("pit_this_lap"):
+            pit_stops_executed.append({"lap": lap_num, "compound": info["compound"]})
+        lap_num += 1
+
+    env.close()
+    return {
+        "final_position":    int(info.get("position", 20)),
+        "race_time_s":       round(float(info.get("cumulative_race_time", 0.0)), 1),
+        "pit_stops_executed": pit_stops_executed,
+        "lap_by_lap":        lap_by_lap,
+    }
+
+
+def _run_recommend_sync(
+    driver: str,
+    circuit: str,
+    starting_compound: str,
+    starting_position: int,
+    total_laps: int,
+    year: int,
+    ppo_model: PPO,
+) -> dict:
+    env = SandboxRaceEnv()
+    obs, _ = env.reset(options={
+        "circuit":             circuit,
+        "driver":              driver,
+        "year":                year,
+        "total_laps":          total_laps,
+        "starting_position":   starting_position,
+        "starting_compound":   starting_compound,
+        "two_compound_rule_enforced": True,
+    })
+
+    lap_by_lap: list[dict] = []
+    pit_stops: list[dict] = []
+    lap_num = 1
+    terminated = truncated = False
+    info: dict = {}
+
+    while not (terminated or truncated):
+        action, _ = ppo_model.predict(obs, deterministic=True)
+        obs, _, terminated, truncated, info = env.step(int(action))
+        lap_by_lap.append({
+            "lap":      lap_num,
+            "compound": info["compound"],
+            "tire_age": int(info["tire_age"]),
+            "lap_time": round(float(info["lap_time"]), 3),
+            "position": int(info["position"]),
+        })
+        if info.get("pit_this_lap"):
+            pit_stops.append({"lap": lap_num, "compound": info["compound"]})
+        lap_num += 1
+
+    env.close()
+    return {
+        "recommended_pit_stops": pit_stops,
+        "final_position":        int(info.get("position", 20)),
+        "race_time_s":           round(float(info.get("cumulative_race_time", 0.0)), 1),
+        "lap_by_lap":            lap_by_lap,
+    }
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
@@ -359,3 +528,92 @@ async def get_historical_grid(year: int, circuit_name: str) -> list[str]:
         )
 
     return _build_grid(race)
+
+
+# ── Phase 6.2 — Sandbox inference endpoints ───────────────────────────────────
+
+@app.post("/api/sandbox/degradation-curve", response_model=DegradationCurveResponse)
+async def sandbox_degradation_curve(
+    req: DegradationCurveRequest,
+) -> DegradationCurveResponse:
+    circuit       = _find_circuit(req.circuit)
+    total_laps    = req.total_race_laps or _TOTAL_LAPS_TYPICAL.get(circuit, 57)
+    weather       = _weather_for(circuit, req.year)
+    compound_up   = req.compound.upper()
+
+    lap_times = predict_degradation_curve(
+        driver=req.driver.upper(),
+        circuit=circuit,
+        compound=compound_up,
+        stint_start_lap=req.stint_start_lap,
+        stint_length=req.stint_length,
+        total_race_laps=total_laps,
+        apply_compound_dynamics=True,
+        air_temp=weather["air_temp"],
+        track_temp=weather["track_temp"],
+        humidity=weather["humidity"],
+        is_wet=weather["is_wet"],
+        year=req.year or 2024,
+    )
+
+    return DegradationCurveResponse(
+        driver=req.driver.upper(),
+        circuit=circuit,
+        compound=compound_up,
+        lap_times=[round(t, 3) for t in lap_times],
+        cliff_lap=COMPOUND_CLIFF_LAP.get(compound_up, 999),
+        confidence=_confidence(circuit),
+    )
+
+
+@app.post("/api/sandbox/simulate", response_model=SimulateResponse)
+async def sandbox_simulate(req: SimulateRequest) -> SimulateResponse:
+    circuit    = _find_circuit(req.circuit)
+    total_laps = req.total_laps or _TOTAL_LAPS_TYPICAL.get(circuit, 57)
+    year       = req.year or 2024
+
+    _COMPOUND_ACTION = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
+    pit_action_map: dict[int, int] = {}
+    for ps in req.pit_stops:
+        compound_up = ps.compound.upper()
+        if compound_up not in _COMPOUND_ACTION:
+            raise HTTPException(status_code=422, detail=f"Unknown compound: {ps.compound}")
+        pit_action_map[ps.lap] = _COMPOUND_ACTION[compound_up]
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        app.state.executor,
+        lambda: _run_simulate_sync(
+            driver=req.driver.upper(),
+            circuit=circuit,
+            starting_compound=req.starting_compound.upper(),
+            starting_position=req.starting_position,
+            pit_action_map=pit_action_map,
+            total_laps=total_laps,
+            year=year,
+        ),
+    )
+    return SimulateResponse(**result)
+
+
+@app.post("/api/sandbox/recommend", response_model=PPORecommendResponse)
+async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
+    circuit    = _find_circuit(req.circuit)
+    total_laps = req.total_laps or _TOTAL_LAPS_TYPICAL.get(circuit, 57)
+    year       = req.year or 2024
+    ppo_model  = app.state.ppo_sandbox
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        app.state.executor,
+        lambda: _run_recommend_sync(
+            driver=req.driver.upper(),
+            circuit=circuit,
+            starting_compound=req.starting_compound.upper(),
+            starting_position=req.starting_position,
+            total_laps=total_laps,
+            year=year,
+            ppo_model=ppo_model,
+        ),
+    )
+    return PPORecommendResponse(**result)

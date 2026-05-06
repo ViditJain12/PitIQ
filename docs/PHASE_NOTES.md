@@ -708,3 +708,57 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 **Open questions:**
 - Will rival-awareness differentiate more clearly in scenarios with explicit undercut windows? Bahrain ZHO P15 had high rival stochasticity but not necessarily clean 1.5s gap windows. A Spa or Bahrain scenario where VER starts P5 surrounded by rivals on different strategies might show a clearer Grid PPO > Sandbox PPO signal.
 - Phase 5.3 evaluation harness across 20+ test scenarios should include circuits with naturally high undercut frequency (Spa, Bahrain, Baku) and mid-grid starting positions to give rival-awareness its best opportunity to differentiate.
+
+---
+
+## Phase 5.3 — Evaluation Harness + RESULTS.md (2026-05-06)
+
+**Built:**
+- `backend/src/pitiq/ml/evaluate.py` — evaluation harness: 8 scenarios × 4 policies × 20 episodes = 640 total episodes
+- `models/evaluation_results.json` — all metrics in structured JSON
+- `models/figures/eval_position_gains.png` — positions gained bar chart (sandbox + grid side-by-side)
+- `models/figures/eval_reward_comparison.png` — reward comparison bar chart
+- `docs/RESULTS.md` — comprehensive project results document (8 sections)
+
+**Scenarios (4 sandbox + 4 grid):** Bahrain VER P1, Bahrain ZHO P15, Italian NOR P3, Belgian HAM P6
+
+**Sandbox policies:** PPO Sandbox, Cliff-pit, Never-pit, Random
+**Grid policies:** PPO Grid, PPO Sandbox (obs[:13]), Fixed lap-18, Random
+
+**Key results:**
+
+| Scenario | Best policy | Key margin |
+|---|---|---|
+| Sandbox Bahrain VER P1 | Cliff-pit +8.67 | PPO +8.15 ≈ cliff-pit; +239 pts over never-pit |
+| Sandbox ZHO P15 | (degenerate) | All policies P20 — env limitation |
+| Sandbox Italian NOR P3 | Cliff-pit +9.26/P1 | PPO defaults to never-pit (OOD) |
+| Sandbox Belgian HAM P6 | Cliff-pit +12.62/P1 | PPO = never-pit reward (rule violation) |
+| Grid Bahrain VER P1 | Fixed +14.67 ≈ Grid PPO +14.65 | Ceiling effect; all learned policies P1 |
+| Grid ZHO P15 | PPO Sandbox P7.3 (+7.7) | Grid PPO P8.3 (+6.7); both beat Fixed (+4.7) |
+| Grid Italian NOR P3 | Grid PPO +9.47/P1/100% | vs Fixed +6.88/P1.8/35% (+37% win rate) |
+| Grid Belgian HAM P6 | Grid PPO +11.54/P1.4/70% | vs Fixed +3.88/P4.0/0% (+198% reward, +70% win rate) |
+
+**Key findings:**
+
+1. **Grid PPO generalises across all 4 circuits**. Italian (+9.47/P1/100%) and Belgian (+11.54/P1.4/70%) confirm the rival-aware 25-dim obs enables correct undercut/overcut timing that a fixed heuristic cannot match.
+
+2. **Sandbox PPO overfits to Bahrain**. At Italian NOR P3 and Belgian HAM P6, it defaults to never-pit (identical reward to the Never-pit baseline). It was trained on P1–P10 starts; P3/P6 MEDIUM starts at Monza/Spa were never in its distribution. Cliff-pit, not PPO Sandbox, is the best heuristic on these scenarios.
+
+3. **SandboxRaceEnv mid-grid evaluation degenerates**. ZHO P15 sandbox: all 4 policies finish P20. The static 1-stop rival model assigns fixed pace profiles that overwhelm any strategy ZHO can take. Sandbox is reliable only for P1–P5 starts. GridRaceEnv is required for mid-grid evaluation.
+
+4. **PPO Sandbox in Grid env achieves position but violates two-compound rule**. At Italian and Belgian, it finishes P1.4–P1.6 but with −106 to −126 reward (vs Grid PPO's +9.47 to +11.54). It's winning on raw pace without pitting correctly — rule violation triggers the −100 terminal penalty.
+
+5. **Grid PPO Bahrain ZHO P15 vs Sandbox PPO**: Sandbox PPO (obs[:13]) marginally leads Grid PPO (P7.3 vs P8.3, +7.7 vs +6.7 gained). Grid PPO has higher variance (σ=1.71 vs 0.73). Both beat Fixed (+4.7 gained). The rival-aware features provide limited additional signal in this scenario — ZHO's gains are driven by pace vs the grid more than by undercut timing. Phase 5.2's finding confirmed.
+
+**Worked well:**
+- Script ran cleanly in ~10 minutes for 640 episodes; `caffeinate -dims` + `nohup` setup worked identically to Phase 5.2
+- The 4-scenario design cleanly exposed 3 different failure modes in a single eval run (env degeneracy, OOD policy, rule violation)
+- Loading meta JSONs from disk (not hardcoding numbers) means re-running the evaluation always reflects the latest trained models
+
+**Pain points:**
+- `KeyError: 'mae'` on first run — meta JSONs have a `metrics` nested key (`xgb_baseline_meta["metrics"]["mae"]`), not a top-level key. Quick fix but required a re-run.
+- First run completed all 640 episodes correctly but crashed before saving JSON; second run was identical output, confirming determinism.
+
+**Open questions:**
+- Will Grid PPO's advantage widen on scenarios with explicit undercut windows where gap_to_rival_ahead < 1.5s and rival on 10+ older tires? Spa HAM P6 is suggestive but the margin could be larger at a higher-throughput undercut circuit (e.g., Bahrain VER starting P5 behind rivals on hard tires).
+- Sandbox PPO could likely be fixed by extending Stage 2 training distribution to P1–P15 and including MEDIUM starting compounds. Whether that is worth doing vs just using Grid PPO is a Phase 6+ question.

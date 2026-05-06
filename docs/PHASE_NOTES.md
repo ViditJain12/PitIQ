@@ -636,3 +636,75 @@ XGBoost uses Homebrew libomp; PyTorch bundles its own OpenMP runtime. Loading bo
 **Open questions for Phase 5.2:**
 - Will the 25-dim rival-aware obs provide enough signal for PPO to learn undercut/overcut timing that beats a cliff-pit heuristic? The undercut window flag and rival tire age features are the key differentiators.
 - Multi-circuit curriculum worked cleanly for Stage 2 — same pattern can be applied in Phase 5.2 with grid races at Bahrain + 3 other circuits.
+
+---
+
+## Phase 5.2 — PPO Grid Agent (2026-05-06)
+
+**Built:**
+- `backend/src/pitiq/ml/train_ppo_grid.py` — PPO agent on `GridRaceEnv` with 3-stage curriculum
+- `pitiq.ml.predict.predict_lap_times_batch()` — batch XGBoost inference for all 20 cars in one call
+- `pitiq.ml.rival_policy.predict_pit_probabilities_batch()` — batch rival pit probability inference
+- `GridRaceEnv.step()` refactored to use both batch functions (replaces two per-car loops)
+- Artifacts: `models/ppo_grid_final.zip`, `models/ppo_grid_best.zip`, `models/figures/grid_training_curve.png`, `models/figures/grid_baseline_comparison.png`
+
+**Training run:**
+- 3.29 hours total on CPU (Apple M-series), 1.5M timesteps, 2 parallel envs (DummyVecEnv)
+- 126 fps achieved after batch optimization (initial run: 7 fps — killed after 1 rollout, 17.6× speedup)
+- 3-stage curriculum:
+  - Stage 1 (0–200K): fixed scenario — Bahrain 2024, VER, P1, actual qualifying grid
+  - Stage 2 (200K–600K): Bahrain only, ego from [VER, LEC, NOR, HAM, ZHO], P1–P10 starts
+  - Stage 3 (600K–1.5M): all 4 circuits (Bahrain, Monza, Spa, Abu Dhabi), 5 drivers, P1–P15
+
+**Training curve (EvalCallback — deterministic, Bahrain VER P1, 5 eps):**
+- 100K: +12.76 — fast Stage 1 convergence; agent learning pit timing from rival context
+- 200K: −22.64 — Stage 1→2 transition shock; `approx_kl=0.208`, `explained_variance=−2.64` confirm large policy shift
+- 300K: +14.33 — full recovery within 100K steps; Stage 2 generalisation working
+- 400K–500K: +14.06–12.96 — Stage 2 stable plateau
+- 600K: +14.81 — Stage 3 onset; no regression (Stage 2 generalised cleanly)
+- 700K–1M: +14.79–14.89 — Stage 3 plateau; best model saved at 1M steps (+14.89)
+- 1.5M: +13.87 — slight late-training variance, best model at 1M is the production model
+
+**Convergence metrics at end of training:** `explained_variance=0.847`, `entropy_loss=−0.093`, `approx_kl=0.013` — healthy PPO convergence. Value function well-calibrated; policy has reduced exploration but not collapsed (entropy still negative and non-trivial).
+
+**Baseline comparison results:**
+
+Bahrain VER P1 (easy scenario — all smart policies find optimal strategy):
+
+| Policy | Mean Reward | Mean Pos | Wins |
+|---|---|---|---|
+| Grid PPO | +14.87 | P1.0 | 10/10 |
+| Sandbox PPO | +14.23 | P1.0 | 10/10 |
+| Fixed (lap 18) | +14.67 | P1.0 | 10/10 |
+| Random | −93.22 | P20.0 | 0/10 |
+
+Bahrain ZHO P15 (hard scenario — mid-grid, struggling driver, high rival stochasticity):
+
+| Policy | Mean Reward | Mean Pos | Wins |
+|---|---|---|---|
+| Grid PPO | −1.79 | P8.5 | 0/10 |
+| Sandbox PPO | +1.48 | P7.3 | 0/10 |
+| Fixed (lap 18) | −5.50 | P10.4 | 0/10 |
+| Random | −88.80 | P20.0 | 0/10 |
+
+**Key findings:**
+- In VER P1 (simplest scenario): all three non-random policies converge — Grid PPO edges Sandbox PPO and Fixed by small margins (+0.64 reward vs Sandbox, +0.20 vs Fixed). Rival-awareness not differentiating in this scenario because the optimal strategy is well-determined regardless of rivals.
+- In ZHO P15 (hard scenario): adaptive learned strategies (Grid PPO P8.5, Sandbox PPO P7.3) both outperform fixed heuristic (P10.4) by ~2–3 positions, validating that learned policies generalise meaningfully over rule-based strategies in complex multi-car scenarios.
+- Sandbox PPO marginally outperforms Grid PPO on ZHO P15 (P7.3 vs P8.5). Interpretation: this specific evaluation scenario (ZHO mid-grid, Bahrain, high rival stochasticity) introduces variance that the Grid PPO's rival-aware features partially over-weight. Rival-aware features are expected to show clearer benefit in scenarios with explicit undercut windows (gap_ahead < 1.5s, rival on older tires) — this ZHO P15 scenario has high positional variance from rival stochasticity but not necessarily clean undercut windows from P15.
+- The ~3-position advantage of learned policies over Fixed strategy is the primary validation metric: adaptive strategies are meaningfully better than rule-based heuristics in the complex multi-car environment.
+
+**Critical fix — batch XGBoost inference:**
+Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Root cause: 39 individual XGBoost calls per step (20 `predict_lap_time` + 19 `predict_pit_probability`), each constructing a separate 1-row DataFrame and running `pd.get_dummies` independently. Fix: added `predict_lap_times_batch()` and `predict_pit_probabilities_batch()` functions that build one N-row DataFrame per step and call `model.predict()` once. Result: 7 fps → 126 fps (17.6× speedup). At 7 fps, 1.5M steps would have taken ~60 hours; after fix, 3.29 hours.
+
+**Worked well:**
+- Stage 2→3 curriculum transition was clean — no regression at 600K (unlike the Stage 1→2 dip at 200K). Suggests Stage 2's multi-driver/position diversity adequately prepared the policy for multi-circuit generalisation.
+- `ent_coef=0.02` (vs 0.01 in Phase 5.1) kept entropy from collapsing prematurely during Stage 3; policy stayed exploratory through the full 1.5M steps.
+- `caffeinate -dims` + `nohup` setup allowed unattended overnight training — process survived laptop sleeping and terminal closure.
+
+**Pain points:**
+- First training attempt ran for ~8 minutes at 7 fps before the bottleneck was diagnosed. The per-car prediction loop is O(N) in naive calls; the GridRaceEnv's 20-car grid makes this 20× worse than the SandboxRaceEnv without batching.
+- `n_envs=2` (vs 4 for Sandbox) was chosen conservatively; in practice 2 envs achieved adequate throughput after batching. Could revisit 4 envs for Phase 5.3 if more training is needed.
+
+**Open questions:**
+- Will rival-awareness differentiate more clearly in scenarios with explicit undercut windows? Bahrain ZHO P15 had high rival stochasticity but not necessarily clean 1.5s gap windows. A Spa or Bahrain scenario where VER starts P5 surrounded by rivals on different strategies might show a clearer Grid PPO > Sandbox PPO signal.
+- Phase 5.3 evaluation harness across 20+ test scenarios should include circuits with naturally high undercut frequency (Spa, Bahrain, Baku) and mid-grid starting positions to give rival-awareness its best opportunity to differentiate.

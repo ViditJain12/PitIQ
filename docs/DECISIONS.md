@@ -340,6 +340,25 @@ laps add noise).
 **Why:** Cliff-pit depends on the current compound's cliff lap, which requires obs inspection. Fixed lap-18 is the simplest possible non-trivial heuristic — it satisfies the two-compound rule (always pits before lap 40 even at Belgian 44 laps), avoids cliff violations, and represents the strategy teams use when they have no telemetry. It also matches the lap-18 timing used in the Phase 5.2 baseline comparison, so results are comparable. Belgian HAM P6 result (+3.88 / P4.0 / 0% win) confirms fixed lap-18 is a weak Grid heuristic and Grid PPO's +70% win-rate margin is a meaningful gap.
 **Alternatives considered:** Cliff-pit (requires obs decoding — more complex, harder to understand as a baseline); median-pit-lap from training data per circuit (too specific, removes the "naive heuristic" character of the baseline).
 
+## 2026-05-06 — In-memory Parquet loading at startup via app.state
+**Context:** FastAPI endpoints need access to `lap_features.parquet` (108K rows) and `driver_styles.parquet` (33 rows). The naive approach reads from disk on every request.
+**Decision:** Load both Parquet files into `app.state` during the `@app.on_event("startup")` handler. All endpoints read from `app.state.lap_features` / `app.state.driver_styles` in memory.
+**Why:** The combined data footprint is small (~50MB in memory). Per-request Parquet reads at 108K rows would add 30–100ms of I/O per call and require holding a file handle across concurrent requests. Loading once at startup reduces all data-dependent endpoints to pure in-memory pandas operations — measured at 1–12ms. The startup event is a standard FastAPI pattern for exactly this use case.
+**Alternatives considered:** SQLite cache (rejected: adds a dependency and a schema migration for data that doesn't change between restarts); per-request Parquet read with an LRU cache (rejected: more complex, first-request latency spike, harder to reason about memory usage); Redis (rejected: overkill for a single-process dev server at this scale).
+
+## 2026-05-06 — CORS origin locked to localhost:5173 (Vite dev server)
+**Context:** Frontend runs on `http://localhost:5173` in development. FastAPI's CORS middleware must explicitly allow this origin or browser preflight requests will be rejected.
+**Decision:** `allow_origins=["http://localhost:5173"]` in `CORSMiddleware`. Credentials and all methods/headers allowed for dev ergonomics.
+**Why:** Locking to a single explicit origin (rather than `["*"]`) prevents accidental credential leakage if the API is accidentally exposed on a non-loopback interface during development. The Vite dev server always uses port 5173 by default.
+**Alternatives considered:** `allow_origins=["*"]` (rejected: overly permissive, masks the production configuration requirement); environment-variable-driven origin list (deferred to Phase 10 deployment — premature for a dev-only backend).
+**Follow-up:** Update to production frontend URL in Phase 10 (deployment). Add `ALLOWED_ORIGINS` env var support at that point.
+
+## 2026-05-06 — Short-stint filter (< 5 laps) for winner_strategy reconstruction
+**Context:** FastF1 occasionally records spurious Stint number changes of 1–4 laps around VSC periods, red flags, or pit lane drive-throughs. Without filtering, these appear as pit stops in the reconstructed strategy.
+**Decision:** In `_reconstruct_strategy()`, compute stint lengths and skip any stint with fewer than 5 laps when building the strategy list.
+**Why:** A genuine pit stop requires at least a lap in the pits + return to race position. Real racing stints are almost never shorter than 5 laps by design (a pit stop with < 5 laps of the new tire wastes more time than it gains). The 5-lap threshold was validated against 12 known artifact cases (e.g., 2021 Russian GP HAM, 2022 Monaco GP PER) where the filter correctly removed ghost stints; and against 2024 Bahrain VER where no stints are filtered (all 3 stints are 15/18/19 laps — genuinely a 2-stop race).
+**Alternatives considered:** Filtering by compound change (rejected: VSC stints can keep the same compound, making this insufficient); using only the `PitInTime`/`PitOutTime` columns (rejected: these have frequent NaN in the cleaned dataset — lap_features cleans timing but doesn't guarantee pit columns are populated).
+
 ## 2026-05-04 — gamma=0.99 (high discount) for terminal-reward-dominated env
 **Context:** `SandboxRaceEnv` terminal reward (`−position × 2.0 ± rule_bonus`) dominates the total episode return. A 57-lap Bahrain race means the terminal reward is 57 steps away from the agent's first pit decision around lap 18.
 **Decision:** `gamma=0.99`.

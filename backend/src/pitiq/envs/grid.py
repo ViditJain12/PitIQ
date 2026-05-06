@@ -36,8 +36,8 @@ from pitiq.ml.compound_constants import (
     COMPOUND_CLIFF_PENALTY_S,
     COMPOUND_FRESH_TIRE_OFFSET_S,
 )
-from pitiq.ml.predict import predict_lap_time
-from pitiq.ml.rival_policy import predict_pit_probability
+from pitiq.ml.predict import predict_lap_time, predict_lap_times_batch
+from pitiq.ml.rival_policy import predict_pit_probability, predict_pit_probabilities_batch
 from pitiq.envs.grid_constants import OVERTAKING_DIFFICULTY
 
 logger = logging.getLogger(__name__)
@@ -496,42 +496,59 @@ class GridRaceEnv(gym.Env):
         )
         prev_ego_pos = self._prev_ego_position
 
-        # (b) Rival pit decisions via behavior-cloned policy (Phase 4.5.1 XGBClassifier).
-        rival_new_compound: dict[str, str | None] = {}
-        for car in self._grid:
-            if car is ego:
-                continue
-            if self._rival_pit_decision(car, laps_remaining):
-                rival_new_compound[car.driver] = _rival_pit_compound_choice(
-                    car, laps_remaining
-                )
-            else:
-                rival_new_compound[car.driver] = None
-
-        # (c) Compute lap times for all 20 cars
+        # (b) Rival pit decisions — single batch call for all 19 rivals.
         is_wet    = bool(self._weather.get("is_wet", False))
         air_temp  = self._weather.get("air_temp")  or self._infer_air
         track_temp = self._weather.get("track_temp") or self._infer_track
         humidity  = self._weather.get("humidity")  or self._infer_hum
+        _track_temp_val = float(track_temp or 30.0)
+
+        rivals = [c for c in self._grid if c is not ego]
+        pit_probs = predict_pit_probabilities_batch(
+            drivers       = [c.driver          for c in rivals],
+            circuit       = self._circuit,
+            compounds     = [c.compound        for c in rivals],
+            tire_ages     = [c.tire_age        for c in rivals],
+            laps_remaining = laps_remaining,
+            positions     = [c.current_position for c in rivals],
+            stint_numbers = [c.stint_number    for c in rivals],
+            fuel_estimates = [c.fuel_estimate_kg for c in rivals],
+            is_wet        = is_wet,
+            track_temp    = _track_temp_val,
+            year          = self._year,
+        )
+
+        rival_new_compound: dict[str, str | None] = {}
+        for car, prob in zip(rivals, pit_probs):
+            rival_pits = bool(self._rng.random() < prob)
+            if not car.has_used_2nd_compound and laps_remaining < 8:
+                rival_pits = True
+            if laps_remaining <= 2:
+                rival_pits = False
+            if rival_pits:
+                rival_new_compound[car.driver] = _rival_pit_compound_choice(car, laps_remaining)
+            else:
+                rival_new_compound[car.driver] = None
+
+        # (c) Compute lap times for all 20 cars in one batch XGBoost call.
+        raw_lts = predict_lap_times_batch(
+            drivers       = [c.driver            for c in self._grid],
+            circuit       = self._circuit,
+            compounds     = [c.compound          for c in self._grid],
+            tire_ages     = [float(c.tire_age)   for c in self._grid],
+            stint_numbers = [c.stint_number      for c in self._grid],
+            fuel_loads    = [c.fuel_estimate_kg  for c in self._grid],
+            positions     = [float(c.current_position) for c in self._grid],
+            laps_remaining = float(laps_remaining),
+            is_wet        = is_wet,
+            air_temp      = air_temp,
+            track_temp    = track_temp,
+            humidity      = humidity,
+            year          = self._year,
+        )
 
         lap_times: dict[str, float] = {}
-        for car in self._grid:
-            lt = predict_lap_time(
-                driver        = car.driver,
-                circuit       = self._circuit,
-                compound      = car.compound,
-                tire_age      = car.tire_age,
-                stint_number  = car.stint_number,
-                fuel_load     = car.fuel_estimate_kg,
-                position      = float(car.current_position),
-                laps_remaining = float(laps_remaining),
-                is_wet        = is_wet,
-                air_temp      = air_temp,
-                track_temp    = track_temp,
-                humidity      = humidity,
-                year          = self._year,
-            )
-            # Compound dynamics: fresh-tire speed bonus + post-cliff degradation
+        for car, lt in zip(self._grid, raw_lts):
             lt += COMPOUND_FRESH_TIRE_OFFSET_S.get(car.compound, 0.0)
             lpc = max(0, car.tire_age - COMPOUND_CLIFF_LAP.get(car.compound, 999))
             lt += lpc * COMPOUND_CLIFF_PENALTY_S.get(car.compound, 0.0)

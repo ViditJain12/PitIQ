@@ -128,6 +128,79 @@ def load_model(
 
 # ── Single-lap inference ──────────────────────────────────────────────────────
 
+def predict_lap_times_batch(
+    drivers: list[str],
+    circuit: str,
+    compounds: list[str],
+    tire_ages: list[float],
+    stint_numbers: list[int],
+    fuel_loads: list[float],
+    positions: list[float],
+    laps_remaining: float,
+    air_temp: float | None = None,
+    track_temp: float | None = None,
+    humidity: float | None = None,
+    is_wet: bool = False,
+    year: int = 2025,
+    round_number: int | None = None,
+    model_path: str = _DEFAULT_MODEL_PATH,
+) -> list[float]:
+    """Batch-predict lap times for N cars in a single XGBoost call.
+
+    Builds one N-row DataFrame and calls model.predict once — avoids the
+    per-car DataFrame construction and pd.get_dummies overhead of N individual
+    predict_lap_time() calls.  All positional args are parallel lists of length N.
+    """
+    from pitiq.ml.train_xgboost import STYLE_FEATURES, _build_feature_matrix
+
+    model, feature_cols, styles_df, circuit_defaults = load_model(model_path)
+
+    if circuit not in circuit_defaults:
+        known = sorted(circuit_defaults.keys())
+        raise ValueError(f"Unknown circuit {circuit!r}. Known: {known}")
+    meta = circuit_defaults[circuit]
+
+    _air   = air_temp   if air_temp   is not None else meta["air_temp"]
+    _track = track_temp if track_temp is not None else meta["track_temp"]
+    _hum   = humidity   if humidity   is not None else meta["humidity"]
+    _round = round_number if round_number is not None else meta["typical_round"]
+
+    n = len(drivers)
+    rows = []
+    for i in range(n):
+        d = drivers[i]
+        if d in styles_df.index:
+            sv = styles_df.loc[d]
+        else:
+            sv = None
+        row: dict = {
+            "tire_age":           float(tire_ages[i]),
+            "stint_number":       float(stint_numbers[i]),
+            "fuel_load_estimate": float(fuel_loads[i]),
+            "laps_remaining":     float(laps_remaining),
+            "position":           float(positions[i]),
+            "length_km":          meta["length_km"],
+            "pit_loss_s":         meta["pit_loss_s"],
+            "air_temp":           float(_air),
+            "track_temp":         float(_track),
+            "humidity":           float(_hum),
+            "Year":               float(year),
+            "RoundNumber":        float(_round),
+            "Compound":           compounds[i].upper(),
+            "circuit_type":       meta["circuit_type"],
+            "EventName":          circuit,
+            "is_street_circuit":  meta["is_street_circuit"],
+            "is_wet":             is_wet,
+        }
+        for feat in STYLE_FEATURES:
+            row[feat] = float(sv[feat]) if sv is not None else float("nan")
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    X  = _build_feature_matrix(df, expected_cols=feature_cols, include_style=True)
+    return list(model.predict(X).astype(float))
+
+
 def predict_lap_time(
     driver: str,
     circuit: str,

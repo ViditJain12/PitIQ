@@ -533,6 +533,56 @@ def _load_rival_policy() -> tuple[_CalibratedPitModel, list[str], pd.DataFrame]:
     return model, feature_columns, styles
 
 
+def predict_pit_probabilities_batch(
+    *,
+    drivers: list[str],
+    circuit: str,
+    compounds: list[str],
+    tire_ages: list[int],
+    laps_remaining: int,
+    positions: list[int],
+    stint_numbers: list[int],
+    fuel_estimates: list[float],
+    is_wet: bool,
+    track_temp: float,
+    year: int = 2025,
+) -> list[float]:
+    """Batch-predict pit probabilities for N rivals in a single model call.
+
+    Same semantics as predict_pit_probability but avoids N×(DataFrame + get_dummies)
+    overhead by building one N-row DataFrame and calling model.predict_proba once.
+    All list arguments are parallel and length N.
+    """
+    model, feature_columns, styles = _load_rival_policy()
+
+    n = len(drivers)
+    rows = []
+    for i in range(n):
+        d = drivers[i]
+        cmp = compounds[i]
+        cliff_lap = float(COMPOUND_CLIFF_LAP.get(cmp, 30))
+        row: dict = {
+            "tire_age":           float(tire_ages[i]),
+            "laps_past_cliff":    max(0.0, float(tire_ages[i]) - cliff_lap),
+            "fuel_load_estimate": float(fuel_estimates[i]),
+            "laps_remaining":     float(laps_remaining),
+            "position":           float(positions[i]),
+            "stint_number":       float(stint_numbers[i]),
+            "track_temp":         float(track_temp),
+            "is_wet":             float(is_wet),
+            "EventName":          circuit,
+            "Compound":           cmp,
+        }
+        for f in STYLE_FEATURES:
+            row[f] = float(styles.loc[d, f]) if d in styles.index else np.nan
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    X  = _make_feature_matrix(df, feature_columns)
+    probs = model.predict_proba(X)[:, 1]
+    return [float(np.clip(p, 0.001, 0.95)) for p in probs]
+
+
 def predict_pit_probability(
     *,
     driver: str,

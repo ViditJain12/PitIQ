@@ -825,3 +825,45 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 **Open questions:**
 - Phase 6.3 (optimize endpoint) will need GridRaceEnv + PPO Grid agent — memory usage could be higher. Single-worker uvicorn still recommended.
 - tire_age in lap_by_lap starts at 2 after lap 1 (env increments after step). This is correct env behavior (1-indexed tire age) but may need frontend note.
+
+---
+
+## Phase 6.3 — Optimizer Mode endpoints (2026-05-07)
+**Built:**
+- 3 new Optimizer endpoints: `POST /api/optimizer/simulate`, `POST /api/optimizer/recommend`, `GET /api/optimizer/historical-validation/{year}/{circuit}`
+- 6 new Pydantic schemas: `GridSimulateRequest/Response`, `OptimizerRecommendRequest/Response`, `RivalPrediction`, `HistoricalValidationResponse`
+- `ppo_grid_best.zip` loaded at startup alongside existing `ppo_sandbox_best.zip`
+- `_run_grid_simulate_sync()` — executes user-specified pit strategy through GridRaceEnv, collects per-lap ego trace + 19 rival final positions/pit histories
+- `_run_grid_recommend_sync()` — runs PPO Grid agent deterministically, same trace collection
+- `_run_historical_validation_sync()` — rebuilds starting grid from lap_features.parquet, runs GridRaceEnv with cliff-heuristic ego, compares simulated vs actual finishing positions
+- `_check_undercut_window()` — pre-step check: gap_to_ahead < 1.5s AND rival_ahead tire_age > 20 AND ego not pitting
+- `_generate_rationale()` — template function referencing specific rival driver, tire age, tire saving coefficient, and circuit confidence
+- `X-Simulation-Time-Ms` response header on heavy historical-validation endpoint
+
+**Key validation results:**
+- VER Bahrain P1: ego_predicted_position=1.0, 19 rival_predictions populated, strategy at lap 18 correctly recorded ✓
+- ZHO P15 → P7 (+8 positions), recommended 2-stop (MEDIUM@22, SOFT@43). Undercut windows correctly fired: SAI ahead with tire_age 26–28, gap 1.26–1.32s. Rationale readable and specific.
+- Historical validation 2024 Bahrain: 55% within ±3 (single-seed), 75% within ±5, mean_delta 3.6, response time 448ms — faster than 3–8s estimate due to batched XGBoost inference
+
+**Metrics:**
+- 14 total API endpoints across Phase 6 (1 health + 7 data/lookup + 3 sandbox + 3 optimizer)
+- Historical validation response: 448ms (single-seed) vs 3–8s estimate; batched XGBoost is the main speedup
+- Undercut detection correctly empty for VER P1 (no rival ahead throughout race), populated for ZHO P15 (SAI on aging MEDIUM)
+
+**Single-seed vs 5-seed accuracy distinction:**
+- Phase 4.5.2 evaluation report (70% within ±3) averaged 5 seeds — a stable estimate of the simulation's expected accuracy
+- Historical-validation endpoint inherently returns a single-seed result due to stochastic rival pit policy; per-call accuracy varies ±10–15%. 55% within ±3 on a single seed is consistent with a 5-seed mean of ~70%.
+- This distinction is documented in DECISIONS.md. Frontend should not claim "70% accurate" based on a single historical-validation call.
+
+**Worked well:**
+- `_check_undercut_window()` pre-step helper pattern is clean — accesses env internal state before calling step(), no env modification needed
+- Template rationale is fast (~0.1ms) and specific enough to be useful: references actual rival name and tire age from the simulation trace, not generic text
+- `X-Simulation-Time-Ms` header added via FastAPI `Response` dependency injection — clean, no middleware needed
+- Thread pool reuse from Phase 6.2 (`app.state.executor`) works for GridRaceEnv; no new infrastructure needed
+
+**Pain points:** None significant. GridRaceEnv loads cleanly under the existing `KMP_DUPLICATE_LIB_OK=TRUE` env var. ppo_grid load time ~1–2s at startup, acceptable.
+
+**Open questions:**
+- Frontend (Phase 7+) should display `rival_predictions` as mini strategy timelines — the pit_history list per rival is the right data structure for this
+- `positions_gained` can be negative if ego loses positions; frontend should handle the sign correctly (positive = gained, negative = lost)
+- Historical-validation accuracy will vary per call due to stochastic rivals; frontend should show it as an "example run" not a deterministic accuracy figure

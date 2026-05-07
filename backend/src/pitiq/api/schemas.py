@@ -103,3 +103,74 @@ class PPORecommendResponse(BaseModel):
     final_position: int
     race_time_s: float
     lap_by_lap: list[LapData]
+
+
+# ── Phase 6.3 — Optimizer Mode schemas ───────────────────────────────────────
+
+class RivalPrediction(BaseModel):
+    driver: str
+    starting_position: int
+    final_position: float
+    pit_history: list[dict]
+    style_summary: dict
+
+
+class GridSimulateRequest(BaseModel):
+    ego_driver: str
+    circuit: str
+    year: int = 2024
+    ego_starting_position: int
+    starting_compound: str
+    total_laps: int
+    starting_grid: list[str]
+    starting_compounds: dict[str, str]
+    pit_stops: list[dict] = []
+    weather: dict | None = None
+
+
+class GridSimulateResponse(BaseModel):
+    ego_driver: str
+    circuit: str
+    ego_strategy: list[dict]
+    ego_predicted_position: float
+    ego_race_time_s: float
+    ego_lap_by_lap: list[dict]
+    rival_predictions: list[RivalPrediction]
+    positions_gained: int
+    undercut_windows_identified: list[dict]
+
+
+class OptimizerRecommendRequest(BaseModel):
+    ego_driver: str
+    circuit: str
+    year: int = 2024
+    ego_starting_position: int
+    starting_compound: str
+    total_laps: int
+    starting_grid: list[str]
+    starting_compounds: dict[str, str]
+    weather: dict | None = None
+
+
+class OptimizerRecommendResponse(BaseModel):
+    ego_driver: str
+    circuit: str
+    recommended_strategy: list[dict]
+    predicted_finish_position: float
+    race_time_s: float
+    positions_gained: int
+    rival_predictions: list[RivalPrediction]
+    undercut_windows_identified: list[dict]
+    strategy_rationale: str
+    confidence: str
+    ego_lap_by_lap: list[dict]
+
+
+class HistoricalValidationResponse(BaseModel):
+    year: int
+    circuit: str
+    actual_results: list[dict]
+    simulated_results: list[dict]
+    accuracy_pct_within_3: float
+    accuracy_pct_within_5: float
+    mean_absolute_delta: float

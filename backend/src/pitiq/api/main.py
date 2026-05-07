@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
@@ -17,7 +18,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -28,15 +29,22 @@ from pitiq.api.schemas import (
     DegradationCurveRequest,
     DegradationCurveResponse,
     DriverInfo,
+    GridSimulateRequest,
+    GridSimulateResponse,
     HealthResponse,
     HistoricalRace,
+    HistoricalValidationResponse,
     LapData,
+    OptimizerRecommendRequest,
+    OptimizerRecommendResponse,
     PitStop,
     PPORecommendRequest,
     PPORecommendResponse,
+    RivalPrediction,
     SimulateRequest,
     SimulateResponse,
 )
+from pitiq.envs.grid import GridRaceEnv
 from pitiq.envs.sandbox import SandboxRaceEnv
 from pitiq.ml.compound_constants import COMPOUND_CLIFF_LAP
 from pitiq.ml.predict import load_model, predict_degradation_curve
@@ -197,16 +205,20 @@ async def startup() -> None:
     # PPO Sandbox agent
     ppo_sandbox = PPO.load(_MODELS_DIR / "ppo_sandbox_best.zip")
 
+    # PPO Grid agent (Optimizer Mode)
+    ppo_grid = PPO.load(_MODELS_DIR / "ppo_grid_best.zip")
+
     # Thread pool for synchronous env execution in async handlers
     executor = ThreadPoolExecutor(max_workers=4)
 
-    app.state.lap_features        = lap_features
-    app.state.driver_styles       = driver_styles
-    app.state.circuit_years       = circuit_years
-    app.state.cluster_map         = cluster_map
+    app.state.lap_features         = lap_features
+    app.state.driver_styles        = driver_styles
+    app.state.circuit_years        = circuit_years
+    app.state.cluster_map          = cluster_map
     app.state.xgb_circuit_defaults = xgb_circuit_defaults
-    app.state.ppo_sandbox         = ppo_sandbox
-    app.state.executor            = executor
+    app.state.ppo_sandbox          = ppo_sandbox
+    app.state.ppo_grid             = ppo_grid
+    app.state.executor             = executor
 
 
 @app.on_event("shutdown")
@@ -345,7 +357,309 @@ def _weather_for(circuit: str, year: int | None) -> dict:
     }
 
 
+_GRID_ACTION_COMPOUND: dict[int, str] = {1: "SOFT", 2: "MEDIUM", 3: "HARD"}
+
+
 # ── Sync env runners (executed in thread pool) ────────────────────────────────
+
+# ── Grid helpers ──────────────────────────────────────────────────────────────
+
+def _rival_predictions_from_grid(
+    grid: list,
+    ego_driver: str,
+    styles_df: pd.DataFrame,
+) -> list[dict]:
+    preds = []
+    for car in grid:
+        if car.driver == ego_driver:
+            continue
+        style_summary: dict = {}
+        if car.driver in styles_df.index:
+            row = styles_df.loc[car.driver]
+            style_summary = {
+                "overall_pace_rank": None if pd.isna(row.get("overall_pace_rank", float("nan"))) else float(row["overall_pace_rank"]),
+                "tire_saving_coef":  None if pd.isna(row.get("tire_saving_coef",  float("nan"))) else float(row["tire_saving_coef"]),
+            }
+        preds.append({
+            "driver":            car.driver,
+            "starting_position": car.starting_position,
+            "final_position":    float(car.current_position),
+            "pit_history":       [{"lap": lap, "compound": cmp} for lap, cmp in car.pit_history],
+            "style_summary":     style_summary,
+        })
+    return preds
+
+
+def _check_undercut_window(env: GridRaceEnv, lap_num: int, action: int) -> dict | None:
+    """Return undercut window dict if gap < 1.5s, rival ahead tire_age > 20, ego not pitting."""
+    if action != 0 or env._ego is None:
+        return None
+    ego = env._ego
+    pos_map = {car.current_position: car for car in env._grid}
+    rival_ahead = pos_map.get(ego.current_position - 1)
+    if rival_ahead is None:
+        return None
+    gap = float(max(0.0, ego.cumulative_race_time - rival_ahead.cumulative_race_time))
+    if gap < 1.5 and rival_ahead.tire_age > 20:
+        return {
+            "lap":             lap_num,
+            "gap_s":           round(gap, 2),
+            "rival_driver":    rival_ahead.driver,
+            "rival_tire_age":  int(rival_ahead.tire_age),
+        }
+    return None
+
+
+def _generate_rationale(
+    driver: str,
+    circuit: str,
+    starting_position: int,
+    starting_compound: str,
+    strategy: list[dict],
+    ego_style: dict,
+    undercut_windows: list[dict],
+    confidence: str,
+) -> str:
+    parts: list[str] = [f"{driver} starting P{starting_position} on {starting_compound}."]
+    if strategy:
+        p = strategy[0]
+        parts.append(f"Optimal strategy: pit to {p['compound']} on lap {p['lap']}.")
+    else:
+        parts.append("No pit stops recommended.")
+    if undercut_windows:
+        uw = undercut_windows[0]
+        parts.append(
+            f"Rival ahead ({uw.get('rival_driver', 'rival')}) on aging tires "
+            f"(age {uw.get('rival_tire_age', 0)}) — undercut window open."
+        )
+    tsave = ego_style.get("tire_saving_coef")
+    if tsave is not None and isinstance(tsave, float) and not pd.isna(tsave) and tsave > 0.99:
+        parts.append(f"Tire saving coefficient ({tsave:.3f}) suggests extended stint viable.")
+    parts.append(f"Circuit confidence: {confidence} ({circuit}).")
+    return " ".join(parts)
+
+
+def _run_grid_simulate_sync(
+    ego_driver: str,
+    circuit: str,
+    starting_compound: str,
+    starting_position: int,
+    pit_action_map: dict[int, int],
+    total_laps: int,
+    year: int,
+    starting_grid: list[str],
+    starting_compounds: dict[str, str],
+    weather: dict | None,
+    styles_df: pd.DataFrame,
+) -> dict:
+    env = GridRaceEnv()
+    obs, _ = env.reset(options={
+        "circuit":               circuit,
+        "year":                  year,
+        "total_laps":            total_laps,
+        "ego_driver":            ego_driver,
+        "ego_starting_position": starting_position,
+        "starting_grid":         starting_grid,
+        "starting_compounds":    starting_compounds,
+        "weather":               weather or {},
+        "two_compound_rule_enforced": True,
+    })
+
+    lap_by_lap: list[dict] = []
+    ego_strategy: list[dict] = []
+    undercut_windows: list[dict] = []
+    lap_num = 1
+    terminated = truncated = False
+    info: dict = {}
+
+    while not (terminated or truncated):
+        action = pit_action_map.get(lap_num, 0)
+        uw = _check_undercut_window(env, lap_num, action)
+        if uw:
+            undercut_windows.append(uw)
+        obs, _, terminated, truncated, info = env.step(action)
+        lap_by_lap.append({
+            "lap":      lap_num,
+            "compound": info["ego_compound"],
+            "tire_age": int(info["ego_tire_age"]),
+            "lap_time": round(float(info["ego_lap_time"]), 3),
+            "position": int(info["ego_position"]),
+        })
+        if action != 0:
+            ego_strategy.append({"lap": lap_num, "compound": _GRID_ACTION_COMPOUND[action]})
+        lap_num += 1
+
+    ego_car = env._ego
+    rival_preds = _rival_predictions_from_grid(env._grid, ego_driver, styles_df)
+    env.close()
+    return {
+        "ego_strategy":                ego_strategy,
+        "ego_predicted_position":      float(ego_car.current_position),
+        "ego_race_time_s":             round(float(ego_car.cumulative_race_time), 1),
+        "ego_lap_by_lap":              lap_by_lap,
+        "rival_predictions":           rival_preds,
+        "positions_gained":            starting_position - int(ego_car.current_position),
+        "undercut_windows_identified": undercut_windows,
+    }
+
+
+def _run_grid_recommend_sync(
+    ego_driver: str,
+    circuit: str,
+    starting_compound: str,
+    starting_position: int,
+    total_laps: int,
+    year: int,
+    starting_grid: list[str],
+    starting_compounds: dict[str, str],
+    weather: dict | None,
+    ppo_model: PPO,
+    styles_df: pd.DataFrame,
+) -> dict:
+    env = GridRaceEnv()
+    obs, _ = env.reset(options={
+        "circuit":               circuit,
+        "year":                  year,
+        "total_laps":            total_laps,
+        "ego_driver":            ego_driver,
+        "ego_starting_position": starting_position,
+        "starting_grid":         starting_grid,
+        "starting_compounds":    starting_compounds,
+        "weather":               weather or {},
+        "two_compound_rule_enforced": True,
+    })
+
+    lap_by_lap: list[dict] = []
+    recommended_strategy: list[dict] = []
+    undercut_windows: list[dict] = []
+    lap_num = 1
+    terminated = truncated = False
+    info: dict = {}
+
+    while not (terminated or truncated):
+        action, _ = ppo_model.predict(obs, deterministic=True)
+        action = int(action)
+        uw = _check_undercut_window(env, lap_num, action)
+        if uw:
+            undercut_windows.append(uw)
+        obs, _, terminated, truncated, info = env.step(action)
+        lap_by_lap.append({
+            "lap":      lap_num,
+            "compound": info["ego_compound"],
+            "tire_age": int(info["ego_tire_age"]),
+            "lap_time": round(float(info["ego_lap_time"]), 3),
+            "position": int(info["ego_position"]),
+        })
+        if action != 0:
+            recommended_strategy.append({"lap": lap_num, "compound": _GRID_ACTION_COMPOUND[action]})
+        lap_num += 1
+
+    ego_car = env._ego
+    rival_preds = _rival_predictions_from_grid(env._grid, ego_driver, styles_df)
+    env.close()
+    return {
+        "recommended_strategy":        recommended_strategy,
+        "predicted_finish_position":   float(ego_car.current_position),
+        "race_time_s":                 round(float(ego_car.cumulative_race_time), 1),
+        "positions_gained":            starting_position - int(ego_car.current_position),
+        "rival_predictions":           rival_preds,
+        "undercut_windows_identified": undercut_windows,
+        "ego_lap_by_lap":              lap_by_lap,
+    }
+
+
+def _run_historical_validation_sync(
+    year: int,
+    circuit: str,
+    lap_features: pd.DataFrame,
+    styles_df: pd.DataFrame,
+) -> dict:
+    race_df = lap_features[(lap_features["Year"] == year) & (lap_features["EventName"] == circuit)]
+    if race_df.empty:
+        raise ValueError(f"No data for {year} {circuit}")
+
+    total_laps = int(race_df["LapNumber"].max())
+
+    # Build starting grid from first-lap positions
+    first_laps = race_df.sort_values("LapNumber").groupby("Driver").first().reset_index()
+    starting_grid: list[str] = first_laps.sort_values("Position")["Driver"].tolist()[:20]
+    pad_idx = 0
+    while len(starting_grid) < 20:
+        starting_grid.append(f"PAD{pad_idx:02d}")
+        pad_idx += 1
+
+    # Starting compounds per driver
+    starting_compounds: dict[str, str] = {}
+    for driver in starting_grid:
+        if driver.startswith("PAD"):
+            starting_compounds[driver] = "SOFT"
+            continue
+        dlaps = race_df[race_df["Driver"] == driver].sort_values("LapNumber")
+        if not dlaps.empty:
+            cmp = str(dlaps.iloc[0]["Compound"]).upper()
+            starting_compounds[driver] = cmp if cmp in {"SOFT", "MEDIUM", "HARD"} else "SOFT"
+        else:
+            starting_compounds[driver] = "SOFT"
+
+    # Actual final results
+    last_laps  = race_df.sort_values("LapNumber").groupby("Driver").last().reset_index()
+    start_pos_map = first_laps.set_index("Driver")["Position"].to_dict()
+    actual_results: list[dict] = [
+        {
+            "driver":            row["Driver"],
+            "position":          int(row["Position"]),
+            "starting_position": int(start_pos_map.get(row["Driver"], 0)),
+        }
+        for _, row in last_laps.sort_values("Position").iterrows()
+    ]
+    actual_pos = {r["driver"]: r["position"] for r in actual_results}
+
+    # Ego = P1 on grid; use cliff-based heuristic (rivals drive via behavior-cloned policy)
+    ego_driver = starting_grid[0]
+    env = GridRaceEnv()
+    env.reset(options={
+        "circuit":               circuit,
+        "year":                  year,
+        "total_laps":            total_laps,
+        "ego_driver":            ego_driver,
+        "ego_starting_position": 1,
+        "starting_grid":         starting_grid,
+        "starting_compounds":    starting_compounds,
+        "two_compound_rule_enforced": True,
+    })
+
+    terminated = truncated = False
+    while not (terminated or truncated):
+        ego = env._ego
+        laps_past_cliff = max(0, ego.tire_age - COMPOUND_CLIFF_LAP.get(ego.compound, 999))
+        action = 3 if (laps_past_cliff > 3 and not ego.has_used_2nd_compound) else 0
+        _, _, terminated, truncated, _ = env.step(action)
+
+    sim_pos = {car.driver: int(car.current_position) for car in env._grid}
+    simulated_results: list[dict] = sorted(
+        [{"driver": d, "position": p} for d, p in sim_pos.items() if not d.startswith("PAD")],
+        key=lambda x: x["position"],
+    )
+    env.close()
+
+    # Accuracy vs actuals
+    common = [d for d in actual_pos if d in sim_pos and not d.startswith("PAD")]
+    if common:
+        deltas    = [abs(sim_pos[d] - actual_pos[d]) for d in common]
+        within_3  = sum(1 for d in deltas if d <= 3) / len(deltas) * 100.0
+        within_5  = sum(1 for d in deltas if d <= 5) / len(deltas) * 100.0
+        mean_delta = sum(deltas) / len(deltas)
+    else:
+        within_3 = within_5 = mean_delta = 0.0
+
+    return {
+        "actual_results":        actual_results,
+        "simulated_results":     simulated_results,
+        "accuracy_pct_within_3": round(within_3, 1),
+        "accuracy_pct_within_5": round(within_5, 1),
+        "mean_absolute_delta":   round(mean_delta, 2),
+    }
+
 
 def _run_simulate_sync(
     driver: str,
@@ -617,3 +931,138 @@ async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
         ),
     )
     return PPORecommendResponse(**result)
+
+
+# ── Phase 6.3 — Optimizer Mode endpoints ──────────────────────────────────────
+
+@app.post("/api/optimizer/simulate", response_model=GridSimulateResponse)
+async def simulate_grid(req: GridSimulateRequest) -> GridSimulateResponse:
+    circuit = _find_circuit(req.circuit)
+
+    _COMPOUND_ACTION_LOCAL = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
+    pit_action_map: dict[int, int] = {}
+    for ps in req.pit_stops:
+        compound_up = str(ps.get("compound", "")).upper()
+        lap = int(ps.get("lap", 0))
+        if compound_up not in _COMPOUND_ACTION_LOCAL:
+            raise HTTPException(status_code=422, detail=f"Unknown compound: {ps.get('compound')}")
+        pit_action_map[lap] = _COMPOUND_ACTION_LOCAL[compound_up]
+
+    styles_df  = app.state.driver_styles
+    loop       = asyncio.get_event_loop()
+    result     = await loop.run_in_executor(
+        app.state.executor,
+        lambda: _run_grid_simulate_sync(
+            ego_driver        = req.ego_driver.upper(),
+            circuit           = circuit,
+            starting_compound = req.starting_compound.upper(),
+            starting_position = req.ego_starting_position,
+            pit_action_map    = pit_action_map,
+            total_laps        = req.total_laps,
+            year              = req.year,
+            starting_grid     = [d.upper() for d in req.starting_grid],
+            starting_compounds = {k.upper(): v.upper() for k, v in req.starting_compounds.items()},
+            weather           = req.weather,
+            styles_df         = styles_df,
+        ),
+    )
+    return GridSimulateResponse(
+        ego_driver                 = req.ego_driver.upper(),
+        circuit                    = circuit,
+        ego_strategy               = result["ego_strategy"],
+        ego_predicted_position     = result["ego_predicted_position"],
+        ego_race_time_s            = result["ego_race_time_s"],
+        ego_lap_by_lap             = result["ego_lap_by_lap"],
+        rival_predictions          = result["rival_predictions"],
+        positions_gained           = result["positions_gained"],
+        undercut_windows_identified = result["undercut_windows_identified"],
+    )
+
+
+@app.post("/api/optimizer/recommend", response_model=OptimizerRecommendResponse)
+async def recommend_optimizer(req: OptimizerRecommendRequest) -> OptimizerRecommendResponse:
+    circuit   = _find_circuit(req.circuit)
+    ppo_model = app.state.ppo_grid
+    styles_df = app.state.driver_styles
+    driver_up = req.ego_driver.upper()
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        app.state.executor,
+        lambda: _run_grid_recommend_sync(
+            ego_driver        = driver_up,
+            circuit           = circuit,
+            starting_compound = req.starting_compound.upper(),
+            starting_position = req.ego_starting_position,
+            total_laps        = req.total_laps,
+            year              = req.year,
+            starting_grid     = [d.upper() for d in req.starting_grid],
+            starting_compounds = {k.upper(): v.upper() for k, v in req.starting_compounds.items()},
+            weather           = req.weather,
+            ppo_model         = ppo_model,
+            styles_df         = styles_df,
+        ),
+    )
+
+    ego_style: dict = {}
+    if driver_up in styles_df.index:
+        row = styles_df.loc[driver_up]
+        ego_style = {k: (None if pd.isna(v) else float(v)) for k, v in row.items()}
+
+    confidence = _confidence(circuit)
+    rationale  = _generate_rationale(
+        driver            = driver_up,
+        circuit           = circuit,
+        starting_position = req.ego_starting_position,
+        starting_compound = req.starting_compound.upper(),
+        strategy          = result["recommended_strategy"],
+        ego_style         = ego_style,
+        undercut_windows  = result["undercut_windows_identified"],
+        confidence        = confidence,
+    )
+
+    return OptimizerRecommendResponse(
+        ego_driver                 = driver_up,
+        circuit                    = circuit,
+        recommended_strategy       = result["recommended_strategy"],
+        predicted_finish_position  = result["predicted_finish_position"],
+        race_time_s                = result["race_time_s"],
+        positions_gained           = result["positions_gained"],
+        rival_predictions          = result["rival_predictions"],
+        undercut_windows_identified = result["undercut_windows_identified"],
+        strategy_rationale         = rationale,
+        confidence                 = confidence,
+        ego_lap_by_lap             = result["ego_lap_by_lap"],
+    )
+
+
+@app.get(
+    "/api/optimizer/historical-validation/{year}/{circuit_name}",
+    response_model=HistoricalValidationResponse,
+)
+async def historical_validation(
+    year: int,
+    circuit_name: str,
+    response: Response,
+) -> HistoricalValidationResponse:
+    # Heavy endpoint — runs full GridRaceEnv simulation (~3-8s). Call sparingly.
+    circuit      = _find_circuit(circuit_name)
+    lap_features = app.state.lap_features
+    styles_df    = app.state.driver_styles
+
+    t0   = time.monotonic()
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            app.state.executor,
+            lambda: _run_historical_validation_sync(year, circuit, lap_features, styles_df),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    response.headers["X-Simulation-Time-Ms"] = str(int((time.monotonic() - t0) * 1000))
+
+    return HistoricalValidationResponse(
+        year    = year,
+        circuit = circuit,
+        **result,
+    )

@@ -1,0 +1,40 @@
+:root {
+  /* Core palette */
+  --color-bg:           #0A0A0A;
+  --color-surface:      #111111;
+  --color-surface-2:    #1A1A1A;
+  --color-border:       #2A2A2A;
+  --color-accent:       #E8002D;
+  --color-accent-dim:   #8B0018;
+  --color-text:         #F0F0F0;
+  --color-text-dim:     #888888;
+  --color-text-muted:   #444444;
+
+  /* Tire compound colors — canonical F1 */
+  --tire-soft:          #E8002D;
+  --tire-medium:        #FFF200;
+  --tire-hard:          #FFFFFF;
+  --tire-intermediate:  #39B54A;
+  --tire-wet:           #0067FF;
+
+  /* Team colors */
+  --team-red-bull:      #3671C6;
+  --team-ferrari:       #E8002D;
+  --team-mercedes:      #27F4D2;
+  --team-mclaren:       #FF8000;
+  --team-aston:         #229971;
+  --team-alpine:        #FF87BC;
+  --team-williams:      #64C4FF;
+  --team-haas:          #B6BABD;
+  --team-sauber:        #52E252;
+  --team-rb:            #6692FF;
+
+  /* Typography */
+  --font-display:       "Barlow Condensed", sans-serif;
+  --font-mono:          "JetBrains Mono", monospace;
+  --font-body:          "Barlow", sans-serif;
+
+  /* Geometry */
+  --radius:             0px;
+  --border:             1px solid var(--color-border);
+}

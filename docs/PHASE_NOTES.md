@@ -867,3 +867,41 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 - Frontend (Phase 7+) should display `rival_predictions` as mini strategy timelines — the pit_history list per rival is the right data structure for this
 - `positions_gained` can be negative if ego loses positions; frontend should handle the sign correctly (positive = gained, negative = lost)
 - Historical-validation accuracy will vary per call due to stochastic rivals; frontend should show it as an "example run" not a deterministic accuracy figure
+
+---
+
+## Phase 7.1 — Shared Components + API Client (2026-05-07)
+
+**Built:**
+- `frontend/src/styles/tokens.css` — full CSS custom property design system: core palette (--color-bg #0A0A0A, --color-accent #E8002D, --color-surface/surface-2/border), canonical F1 tire colors (SOFT=red, MEDIUM=yellow, HARD=white, INT=green, WET=blue), 10 team colors, 3 typeface vars (display/mono/body), --radius 0px, --border shorthand
+- `frontend/index.html` — Google Fonts: Barlow Condensed (400/600/700/900), Barlow (400/500), JetBrains Mono (400/500/700)
+- `frontend/src/api/types.ts` — TypeScript interfaces mirroring all Phase 6 Pydantic schemas (CircuitInfo, DriverInfo, HistoricalRace, Degradation, Simulate, PPORecommend, GridSimulate, OptimizerRecommend, HistoricalValidation)
+- `frontend/src/api/client.ts` — typed fetch wrapper for all 13 endpoints; `get<T>()` + `post<TReq,TRes>()` helpers; `VITE_API_URL` env override
+- `frontend/src/store/index.ts` — Zustand store: circuits, drivers, selectedCircuit/Driver/Year/Mode with setters
+- 6 shared components in `frontend/src/components/`:
+  - `TireBadge` — SVG donut icon + compound label, color from CSS vars, 3 sizes
+  - `DriverBadge` — team-color left border, mono driver code, optional full name
+  - `LapTimeline` — Recharts AreaChart, pit stop ReferenceLine markers, custom tooltip
+  - `StatCard` — mono value, uppercase label, optional accent top border
+  - `LoadingState` — scan-bar CSS animation, uppercase label
+  - `ConfidenceBadge` — HIGH/MEDIUM/LOW with green/yellow/grey color coding
+- `App.tsx` — added `/historical` route, `DataLoader` component for global circuits/drivers fetch on mount
+- `Landing.tsx` — full redesign: CSS grid background (60px grid), animated scanline, Barlow Condensed 900 headline "WHAT'S YOUR STRATEGY?", stat strip (circuits/drivers/seasons/PPO), two mode cards with top-border team color accent, sharp zero-radius corners throughout
+
+**Validation:**
+- TypeScript: 0 errors (`tsc --noEmit`)
+- API client: `api.getCircuits()` returns 29 circuits from browser console (backend running)
+- Zustand store: circuits and drivers populated on mount, confirmed via React DevTools
+- Landing page rendered and confirmed: grid background, scanline animation, correct font rendering (Barlow Condensed/JetBrains Mono), two mode cards route correctly to `/sandbox` and `/optimizer`
+
+**Design decisions locked in this phase:**
+- Industrial F1-broadcast aesthetic: Barlow Condensed 900 for all display text, JetBrains Mono for all data/numbers, zero border-radius everywhere
+- Canonical F1 tire compound colors from FIA/F1 broadcast spec (SOFT=E8002D, MEDIUM=FFF200, HARD=FFFFFF)
+
+**Worked well:**
+- CSS custom properties as the single source of truth for design tokens — components reference `var(--color-accent)` etc., no hardcoded hex values in component files except TireBadge/DriverBadge compound maps
+- Zustand minimal setup: flat store with typed setters, `DataLoader` as a render-null component in App avoids prop drilling or context boilerplate
+- Recharts with CSS var fills/strokes works cleanly — tooltip and axis labels inherit font/color from vars
+
+**Open:**
+- Phase 7.2: Sandbox Mode UI — CircuitPicker → DriverPicker → pit stop placement → live re-simulation

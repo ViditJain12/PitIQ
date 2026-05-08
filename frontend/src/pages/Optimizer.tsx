@@ -1,49 +1,1008 @@
-import PageShell from '../components/PageShell'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
+import {
+  ComposedChart,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+} from 'recharts'
+import { api } from '../api/client'
+import { useStore } from '../store'
+import type { LapData, RivalPrediction, UndercutWindow } from '../api/types'
+import TireBadge from '../components/TireBadge'
+import StatCard from '../components/StatCard'
 
-export default function Optimizer() {
+// ── constants ──────────────────────────────────────────────────────────────
+
+const COMPOUND_COLORS: Record<string, string> = {
+  SOFT: '#E8002D', MEDIUM: '#FFF200', HARD: '#FFFFFF',
+}
+const COMPOUNDS = ['SOFT', 'MEDIUM', 'HARD'] as const
+const YEARS = [2021, 2022, 2023, 2024, 2025]
+
+const LOADING_MESSAGES = [
+  'RUNNING GRID SIMULATION',
+  'MODELING RIVAL BEHAVIOR',
+  'COMPUTING UNDERCUT WINDOWS',
+  'OPTIMIZING YOUR STRATEGY',
+]
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+interface Stint { compound: string; startLap: number; endLap: number; laps: LapData[] }
+
+function buildStints(lapData: LapData[]): Stint[] {
+  const stints: Stint[] = []
+  let cur: Stint | null = null
+  for (const lap of lapData) {
+    if (!cur || cur.compound !== lap.compound) {
+      if (cur) stints.push(cur)
+      cur = { compound: lap.compound, startLap: lap.lap, endLap: lap.lap, laps: [lap] }
+    } else {
+      cur.endLap = lap.lap
+      cur.laps.push(lap)
+    }
+  }
+  if (cur) stints.push(cur)
+  return stints
+}
+
+function formatRaceTime(s: number): string {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = Math.floor(s % 60)
+  return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t
+}
+
+function interpolateRivalPosition(rival: RivalPrediction, totalLaps: number): number[] {
+  const pits = [...rival.pit_history].sort((a, b) => a.lap - b.lap)
+  type KF = { lap: number; pos: number }
+  const frames: KF[] = [{ lap: 1, pos: rival.starting_position }]
+  for (const pit of pits) {
+    const t = pit.lap / totalLaps
+    const basePos = lerp(rival.starting_position, rival.final_position, t)
+    frames.push({ lap: pit.lap, pos: Math.min(20, basePos + 4) })
+  }
+  frames.push({ lap: totalLaps, pos: rival.final_position })
+  frames.sort((a, b) => a.lap - b.lap)
+  const result: number[] = []
+  for (let lap = 1; lap <= totalLaps; lap++) {
+    let lo = frames[0], hi = frames[frames.length - 1]
+    for (let f = 0; f < frames.length - 1; f++) {
+      if (frames[f].lap <= lap && frames[f + 1].lap >= lap) {
+        lo = frames[f]; hi = frames[f + 1]; break
+      }
+    }
+    const t = lo.lap === hi.lap ? 0 : (lap - lo.lap) / (hi.lap - lo.lap)
+    result.push(Math.max(1, Math.min(20, lerp(lo.pos, hi.pos, t))))
+  }
+  return result
+}
+
+function buildGridChartData(
+  egoDriver: string,
+  egoLapByLap: LapData[],
+  rivals: RivalPrediction[],
+  totalLaps: number,
+): Array<Record<string, number>> {
+  const egoPos: Record<number, number> = {}
+  for (const l of egoLapByLap) egoPos[l.lap] = l.position
+  const rivalPos: Record<string, number[]> = {}
+  for (const r of rivals) {
+    if (r.driver !== egoDriver) {
+      rivalPos[r.driver] = interpolateRivalPosition(r, totalLaps)
+    }
+  }
+  const data: Array<Record<string, number>> = []
+  for (let lap = 1; lap <= totalLaps; lap++) {
+    const point: Record<string, number> = { lap }
+    point[egoDriver] = egoPos[lap] ?? 0
+    for (const r of rivals) {
+      if (r.driver !== egoDriver) {
+        point[r.driver] = rivalPos[r.driver][lap - 1] ?? 0
+      }
+    }
+    data.push(point)
+  }
+  return data
+}
+
+// ── types ──────────────────────────────────────────────────────────────────
+
+interface OptimizerResult {
+  mode: 'recommend' | 'simulate'
+  ego_driver: string
+  final_position: number
+  race_time_s: number
+  positions_gained: number
+  pit_stops: Array<{ lap: number; compound: string }>
+  lap_by_lap: LapData[]
+  rival_predictions: RivalPrediction[]
+  undercut_windows: UndercutWindow[]
+  confidence?: string
+  strategy_rationale?: string
+  total_laps: number
+}
+
+interface FormState {
+  circuit: string
+  year: number
+  driver: string
+  startingPosition: number
+  startingCompound: string
+}
+
+// ── sub-components ─────────────────────────────────────────────────────────
+
+function SectionLabel({ n, label }: { n: number; label: string }) {
   return (
-    <PageShell title="Optimizer Mode">
-      <div className="max-w-4xl mx-auto flex flex-col gap-6">
-        <div>
-          <h2 className="text-2xl font-bold mb-1" style={{ color: 'var(--text-primary)' }}>
-            Optimizer
-          </h2>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            Full grid simulation. Rival behavior modeled per driver style. Undercut &amp; overcut
-            windows detected automatically.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <InfoCard label="Mode" value="Full grid (20 cars)" color="var(--color-mercedes)" />
-          <InfoCard label="Engine" value="PPO + GridRaceEnv" color="var(--color-redbull)" />
-          <InfoCard label="Rivals" value="Behavior-cloned policies" color="var(--color-mclaren)" />
-          <InfoCard label="Status" value="Phase 4.5 — coming soon" color="var(--text-muted)" />
-        </div>
-
-        <div
-          className="rounded-xl border p-6 flex items-center justify-center h-48"
-          style={{ borderColor: 'var(--border)', background: 'var(--bg-card)', color: 'var(--text-muted)' }}
-        >
-          Strategy recommendation panel — coming in Phase 8
-        </div>
-      </div>
-    </PageShell>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--color-accent)', background: 'rgba(232,0,45,0.12)', border: '1px solid var(--color-accent)', padding: '1px 6px', letterSpacing: '0.05em' }}>
+        {n}
+      </span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
+        {label}
+      </span>
+    </div>
   )
 }
 
-function InfoCard({ label, value, color }: { label: string; value: string; color: string }) {
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 5 }}>
+      {children}
+    </div>
+  )
+}
+
+function CompoundButtons({ value, onChange }: { value: string; onChange: (c: string) => void }) {
+  return (
+    <div style={{ display: 'flex', gap: 1 }}>
+      {COMPOUNDS.map(c => {
+        const active = value === c
+        return (
+          <button
+            key={c}
+            onClick={() => onChange(c)}
+            style={{
+              padding: '5px 12px', fontFamily: 'var(--font-mono)', fontSize: 10,
+              fontWeight: 700, letterSpacing: '0.1em', cursor: 'pointer', border: 'none',
+              background: active ? COMPOUND_COLORS[c] : 'var(--color-surface-2)',
+              color: active ? (c === 'SOFT' ? '#fff' : '#000') : COMPOUND_COLORS[c],
+              outline: active ? 'none' : `1px solid ${COMPOUND_COLORS[c]}44`,
+              transition: 'background 0.1s',
+            }}
+          >
+            {c}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function StyledSelect({
+  value, onChange, placeholder, children, disabled,
+}: React.SelectHTMLAttributes<HTMLSelectElement> & { placeholder?: string }) {
+  return (
+    <select
+      value={value ?? ''}
+      onChange={onChange}
+      disabled={disabled}
+      style={{
+        width: '100%', padding: '8px 10px',
+        background: 'var(--color-surface-2)', border: 'var(--border)',
+        color: value ? 'var(--color-text)' : 'var(--color-text-muted)',
+        fontFamily: 'var(--font-mono)', fontSize: 12,
+        cursor: disabled ? 'not-allowed' : 'pointer', outline: 'none', appearance: 'none',
+      }}
+    >
+      {placeholder && <option value="" disabled>{placeholder}</option>}
+      {children}
+    </select>
+  )
+}
+
+function StintBar({ stints, totalLaps }: { stints: Stint[]; totalLaps: number }) {
+  return (
+    <div style={{ display: 'flex', height: 20, gap: 1, width: '100%' }}>
+      {stints.map((s, i) => (
+        <div
+          key={i}
+          title={`${s.compound}: L${s.startLap}–L${s.endLap} (${s.laps.length} laps)`}
+          style={{ flex: s.laps.length / totalLaps, background: COMPOUND_COLORS[s.compound] ?? '#888', opacity: 0.85 }}
+        />
+      ))}
+    </div>
+  )
+}
+
+// ── GridPositionTracker ────────────────────────────────────────────────────
+
+function GridPositionTracker({
+  egoDriver, chartData, rivals, pitStops,
+}: {
+  egoDriver: string
+  chartData: Array<Record<string, number>>
+  rivals: RivalPrediction[]
+  pitStops: Array<{ lap: number; compound: string }>
+}) {
+  if (chartData.length === 0) return null
+  const allDrivers = Object.keys(chartData[0]).filter(k => k !== 'lap')
+  const rivalDrivers = allDrivers.filter(d => d !== egoDriver)
+
+  return (
+    <div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
+        Grid Position Tracker
+      </div>
+      <ResponsiveContainer width="100%" height={320}>
+        <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+          <XAxis
+            dataKey="lap"
+            tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+            axisLine={{ stroke: 'var(--color-border)' }}
+            tickLine={false}
+          />
+          <YAxis
+            domain={[1, 20]}
+            reversed
+            tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+            axisLine={false}
+            tickLine={false}
+            width={28}
+            tickCount={5}
+            tickFormatter={(v: number) => `P${v}`}
+          />
+          <Tooltip
+            content={(props) => {
+              if (!props.active || !props.payload?.length) return null
+              const sorted = [...props.payload]
+                .filter(p => typeof p.value === 'number' && (p.value as number) > 0)
+                .sort((a, b) => (a.value as number) - (b.value as number))
+                .slice(0, 6)
+              return (
+                <div style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', padding: '8px 12px', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
+                  <div style={{ color: 'var(--color-text-muted)', marginBottom: 4, letterSpacing: '0.1em' }}>
+                    LAP {props.label as number}
+                  </div>
+                  {sorted.map(e => (
+                    <div
+                      key={e.dataKey as string}
+                      style={{ display: 'flex', gap: 8, padding: '1px 0', color: e.dataKey === egoDriver ? 'var(--color-accent)' : 'var(--color-text-dim)' }}
+                    >
+                      <span style={{ width: 24 }}>P{Math.round(e.value as number)}</span>
+                      <span>{e.dataKey as string}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            }}
+          />
+          {pitStops.map(p => (
+            <ReferenceLine
+              key={`pit-${p.lap}`}
+              x={p.lap}
+              stroke="var(--color-accent)"
+              strokeDasharray="3 3"
+              strokeWidth={1}
+              strokeOpacity={0.4}
+            />
+          ))}
+          {rivalDrivers.map(driver => (
+            <Line
+              key={driver}
+              type="monotone"
+              dataKey={driver}
+              stroke="rgba(255,255,255,0.1)"
+              strokeWidth={1}
+              dot={false}
+              isAnimationActive={false}
+            />
+          ))}
+          <Line
+            type="monotone"
+            dataKey={egoDriver}
+            stroke="var(--color-accent)"
+            strokeWidth={2.5}
+            dot={false}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ display: 'flex', gap: 20, marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ width: 20, height: 2.5, background: 'var(--color-accent)' }} />
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{egoDriver}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ width: 20, height: 1, background: 'rgba(255,255,255,0.2)' }} />
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>RIVALS ({rivals.length})</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── RivalPanel ─────────────────────────────────────────────────────────────
+
+function RivalPanel({ rivals, egoDriver }: { rivals: RivalPrediction[]; egoDriver: string }) {
+  const sorted = [...rivals].sort((a, b) => a.final_position - b.final_position)
+  return (
+    <div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 4 }}>
+        Rival Predictions
+      </div>
+      <div style={{ fontFamily: 'var(--font-body)', fontSize: 10, fontStyle: 'italic', color: 'var(--color-text-muted)', marginBottom: 8 }}>
+        Simulated estimates based on behavior-cloned pit policies (±2–3 position accuracy)
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {sorted.map(r => {
+          const isEgo = r.driver === egoDriver
+          const delta = r.starting_position - Math.round(r.final_position)
+          return (
+            <div
+              key={r.driver}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 12px',
+                background: isEgo ? 'rgba(232,0,45,0.08)' : 'var(--color-surface-2)',
+                border: isEgo ? '1px solid rgba(232,0,45,0.3)' : '1px solid transparent',
+              }}
+            >
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', width: 28, flexShrink: 0 }}>
+                P{Math.round(r.final_position)}
+              </span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, color: isEgo ? 'var(--color-accent)' : 'var(--color-text)', width: 36, flexShrink: 0 }}>
+                {r.driver}
+              </span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', width: 32, flexShrink: 0 }}>
+                P{r.starting_position}→
+              </span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, width: 28, flexShrink: 0, color: delta > 0 ? '#39B54A' : delta < 0 ? 'var(--color-accent)' : 'var(--color-text-muted)' }}>
+                {delta > 0 ? `+${delta}` : String(delta)}
+              </span>
+              <div style={{ display: 'flex', gap: 4, flex: 1, flexWrap: 'wrap' }}>
+                {r.pit_history.map((p, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 3, background: 'var(--color-surface)', padding: '2px 6px' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)' }}>L{p.lap}</span>
+                    <TireBadge compound={p.compound} size="sm" showLabel={false} />
+                  </div>
+                ))}
+                {r.pit_history.length === 0 && (
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>no stops</span>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── UndercutPanel ──────────────────────────────────────────────────────────
+
+function UndercutPanel({ windows }: { windows: UndercutWindow[] }) {
+  if (windows.length === 0) return null
+  return (
+    <div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#FFF200', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
+        ⚡ Undercut Windows Detected ({windows.length})
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        <thead>
+          <tr style={{ borderBottom: 'var(--border)' }}>
+            {['Lap', 'Rival', 'Gap', 'Type', 'Rival Tire Age'].map(h => (
+              <th key={h} style={{ textAlign: 'left', padding: '6px 12px', color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {windows.map((w, i) => {
+            const isTight = w.gap_s < 0.5
+            const typeLabel = isTight ? 'TIGHT BATTLE' : 'UNDERCUT'
+            const typeColor = isTight ? '#FF8C00' : '#FFF200'
+            return (
+              <tr key={i} style={{ borderBottom: '1px solid var(--color-border)', background: i % 2 === 0 ? 'var(--color-surface-2)' : 'transparent' }}>
+                <td style={{ padding: '8px 12px', color: '#FFF200', fontWeight: 700 }}>L{w.lap}</td>
+                <td style={{ padding: '8px 12px', color: 'var(--color-text)' }}>{w.rival_driver}</td>
+                <td style={{ padding: '8px 12px', color: 'var(--color-text-dim)' }}>{w.gap_s.toFixed(2)}s</td>
+                <td style={{ padding: '8px 12px' }}>
+                  <span style={{ color: typeColor, fontSize: 9, letterSpacing: '0.08em' }}>{typeLabel}</span>
+                </td>
+                <td style={{ padding: '8px 12px', color: 'var(--color-text-dim)' }}>{w.rival_tire_age} laps</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── SimulateModal ──────────────────────────────────────────────────────────
+
+function SimulateModal({
+  totalLaps, startingCompound, onSubmit, onClose,
+}: {
+  totalLaps: number
+  startingCompound: string
+  onSubmit: (pitStops: Array<{ lap: number; compound: string }>) => void
+  onClose: () => void
+}) {
+  const [pitStops, setPitStops] = useState<Array<{ lap: number; compound: string }>>([])
+
+  function addStop() {
+    if (pitStops.length >= 4) return
+    setPitStops(prev => [...prev, { lap: Math.round(totalLaps / 2), compound: 'HARD' }])
+  }
+
+  function updateStop(i: number, field: 'lap' | 'compound', value: string | number) {
+    setPitStops(prev => {
+      const stops = [...prev]
+      stops[i] = { ...stops[i], [field]: value }
+      return stops
+    })
+  }
+
+  function removeStop(i: number) {
+    setPitStops(prev => prev.filter((_, idx) => idx !== i))
+  }
+
+  const earlyStop = pitStops.find(p => p.lap < 5)
+  const noCompoundChange = pitStops.length === 0 || pitStops.every(p => p.compound === startingCompound)
+  const canSubmit = !earlyStop && !noCompoundChange
+
   return (
     <div
-      className="rounded-xl border p-4"
-      style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="text-xs mb-1" style={{ color: 'var(--text-muted)' }}>
-        {label}
+      <div
+        style={{ background: 'var(--color-surface)', border: 'var(--border)', padding: 28, width: 440, maxHeight: '80vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 20 }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: 'var(--color-text)', letterSpacing: '0.1em', marginBottom: 6 }}>
+            CONFIGURE PIT STRATEGY
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.08em' }}>
+            Starting on{' '}
+            <span style={{ color: COMPOUND_COLORS[startingCompound], fontWeight: 700 }}>{startingCompound}</span>
+            {' '}— {totalLaps} laps total
+          </div>
+        </div>
+
+        <div>
+          {pitStops.map((stop, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, padding: '8px 10px', background: 'var(--color-surface-2)', border: 'var(--border)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', width: 16, flexShrink: 0 }}>P{i + 1}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>L</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={totalLaps - 2}
+                  value={stop.lap}
+                  onChange={e => updateStop(i, 'lap', Math.max(2, Math.min(totalLaps - 2, Number(e.target.value))))}
+                  style={{ width: 48, padding: '4px 6px', background: 'var(--color-surface)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none' }}
+                />
+              </div>
+              <CompoundButtons value={stop.compound} onChange={c => updateStop(i, 'compound', c)} />
+              <button
+                onClick={() => removeStop(i)}
+                style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 14, lineHeight: 1, padding: '0 4px' }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+
+          {pitStops.length < 4 && (
+            <button
+              onClick={addStop}
+              style={{ width: '100%', padding: '8px', marginTop: 4, background: 'none', border: '1px dashed var(--color-border)', color: 'var(--color-text-dim)', fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer', letterSpacing: '0.1em' }}
+            >
+              + ADD PIT STOP
+            </button>
+          )}
+
+          {earlyStop && (
+            <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(232,0,45,0.08)', border: '1px solid rgba(232,0,45,0.3)', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-accent)', letterSpacing: '0.04em' }}>
+              ✕ Pit stops before lap 5 are not allowed
+            </div>
+          )}
+          {noCompoundChange && (
+            <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(255,242,0,0.08)', border: '1px solid rgba(255,242,0,0.3)', fontFamily: 'var(--font-mono)', fontSize: 10, color: '#FFF200', letterSpacing: '0.05em' }}>
+              ⚠ {pitStops.length === 0 ? 'Add at least one pit stop (two-compound rule)' : 'Two-compound rule requires at least one compound change'}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => onSubmit(pitStops)}
+            disabled={!canSubmit}
+            style={{ flex: 1, padding: '12px', background: canSubmit ? 'var(--color-accent)' : 'var(--color-surface-2)', border: 'none', color: '#fff', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit ? 'pointer' : 'not-allowed' }}
+          >
+            RUN SIMULATION
+          </button>
+          <button
+            onClick={onClose}
+            style={{ padding: '12px 20px', background: 'none', border: 'var(--border)', color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, cursor: 'pointer', letterSpacing: '0.1em' }}
+          >
+            CANCEL
+          </button>
+        </div>
       </div>
-      <div className="font-semibold text-sm" style={{ color }}>
-        {value}
+    </div>
+  )
+}
+
+// ── ResultsView ────────────────────────────────────────────────────────────
+
+function ResultsView({
+  result, stints, chartData, gridChartData,
+}: {
+  result: OptimizerResult
+  stints: Stint[]
+  chartData: Array<{ lap: number; time: number; compound: string; tire_age: number; position: number }>
+  gridChartData: Array<Record<string, number>>
+}) {
+  const times = chartData.map(d => d.time)
+  const minT = Math.min(...times)
+  const maxT = Math.max(...times)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
+
+      {/* Strategy header */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.15em', color: result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-text-muted)', border: `1px solid ${result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-border)'}`, padding: '2px 8px' }}>
+            {result.mode === 'recommend' ? 'PPO OPTIMIZER RECOMMENDATION' : 'USER STRATEGY SIMULATION'}
+          </span>
+          {result.confidence && (
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: result.confidence === 'high' ? '#39B54A' : result.confidence === 'medium' ? '#FFF200' : 'var(--color-text-muted)' }}>
+              {result.confidence.toUpperCase()} CONFIDENCE
+            </span>
+          )}
+        </div>
+        {result.strategy_rationale && (
+          <div style={{ fontFamily: 'var(--font-body)', fontSize: 12, fontStyle: 'italic', color: 'var(--color-text-dim)', lineHeight: 1.6, maxWidth: 640 }}>
+            {result.strategy_rationale}
+          </div>
+        )}
       </div>
+
+      {/* Stat cards */}
+      <div style={{ display: 'flex', gap: 1 }}>
+        <StatCard value={`P${Math.round(result.final_position)}`} label="Predicted Finish" accent={result.final_position <= 3} />
+        <StatCard value={formatRaceTime(result.race_time_s)} label="Race Time" />
+        <StatCard value={result.positions_gained >= 0 ? `+${result.positions_gained}` : String(result.positions_gained)} label="Positions" />
+        <StatCard value={result.pit_stops.length} label="Pit Stops" />
+      </div>
+
+      {/* Pit stop summary */}
+      {result.pit_stops.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {result.pit_stops.map((p, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--color-surface-2)', padding: '5px 10px', border: 'var(--border)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>L{p.lap}</span>
+              <TireBadge compound={p.compound} size="sm" showLabel={false} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: COMPOUND_COLORS[p.compound] }}>{p.compound}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Stint bar */}
+      <div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>Race Strategy</div>
+        <StintBar stints={stints} totalLaps={result.total_laps} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 3 }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>L1</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>L{result.total_laps}</span>
+        </div>
+      </div>
+
+      {/* Lap time chart */}
+      <div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>Lap Times</div>
+        <ResponsiveContainer width="100%" height={200}>
+          <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+            {stints.map((s, i) => (
+              <ReferenceArea key={i} x1={s.startLap} x2={s.endLap} fill={COMPOUND_COLORS[s.compound] ?? '#888'} fillOpacity={0.07} />
+            ))}
+            {result.pit_stops.map(p => (
+              <ReferenceLine key={`pit-${p.lap}`} x={p.lap} stroke="var(--color-text-dim)" strokeDasharray="3 3" strokeWidth={1} />
+            ))}
+            <XAxis dataKey="lap" tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
+            <YAxis domain={[minT - 0.5, maxT + 0.5]} tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }} axisLine={false} tickLine={false} width={44} tickFormatter={(v: number) => v.toFixed(1)} />
+            <Tooltip
+              contentStyle={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)' }}
+              formatter={(value: number, _: string, props: { payload?: { compound?: string; tire_age?: number } }) => [
+                `${value.toFixed(3)}s`,
+                `${props.payload?.compound ?? ''} (age ${props.payload?.tire_age ?? 0})`,
+              ]}
+              labelFormatter={(lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`}
+            />
+            <Line dataKey="time" stroke="var(--color-text)" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: 'var(--color-accent)', stroke: 'none' }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Grid position tracker */}
+      <GridPositionTracker
+        egoDriver={result.ego_driver}
+        chartData={gridChartData}
+        rivals={result.rival_predictions}
+        pitStops={result.pit_stops}
+      />
+
+      {/* Rival predictions */}
+      <RivalPanel rivals={result.rival_predictions} egoDriver={result.ego_driver} />
+
+      {/* Undercut windows */}
+      <UndercutPanel windows={result.undercut_windows} />
+    </div>
+  )
+}
+
+// ── Placeholder ────────────────────────────────────────────────────────────
+
+function Placeholder() {
+  return (
+    <div style={{ height: '100%', minHeight: 400, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+      <div style={{ width: 1, height: 80, background: 'linear-gradient(to bottom, transparent, var(--color-border))' }} />
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
+        Configure race setup to optimize strategy
+      </span>
+    </div>
+  )
+}
+
+// ── main ───────────────────────────────────────────────────────────────────
+
+export default function Optimizer() {
+  const navigate = useNavigate()
+  const seasonDrivers = useStore(s => s.seasonDrivers)
+  const seasonCircuits = useStore(s => s.seasonCircuits)
+  const setSeasonDrivers = useStore(s => s.setSeasonDrivers)
+  const setSeasonCircuits = useStore(s => s.setSeasonCircuits)
+
+  const [form, setForm] = useState<FormState>({
+    circuit: '', year: 2024, driver: '', startingPosition: 1, startingCompound: 'SOFT',
+  })
+  const [grid, setGrid] = useState<string[]>([])
+  const [loadingGrid, setLoadingGrid] = useState(false)
+  const [loadingSeason, setLoadingSeason] = useState(false)
+  const [result, setResult] = useState<OptimizerResult | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [showModal, setShowModal] = useState(false)
+  const [loadingMsgIdx, setLoadingMsgIdx] = useState(0)
+  const loadingInterval = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    if (isLoading) {
+      setLoadingMsgIdx(0)
+      loadingInterval.current = setInterval(() => {
+        setLoadingMsgIdx(i => (i + 1) % LOADING_MESSAGES.length)
+      }, 1500)
+    } else {
+      if (loadingInterval.current) { clearInterval(loadingInterval.current); loadingInterval.current = null }
+    }
+    return () => { if (loadingInterval.current) clearInterval(loadingInterval.current) }
+  }, [isLoading])
+
+  const activeDrivers = seasonDrivers[form.year] ?? []
+  const activeCircuits = seasonCircuits[form.year] ?? []
+  const circuitInfo = activeCircuits.find(c => c.name === form.circuit) ?? null
+  const totalLaps = circuitInfo?.total_laps_typical ?? 58
+
+  const fetchSeasonData = useCallback(async (year: number) => {
+    const needsD = !seasonDrivers[year], needsC = !seasonCircuits[year]
+    if (!needsD && !needsC) return
+    setLoadingSeason(true)
+    try {
+      const [d, c] = await Promise.all([
+        needsD ? api.getSeasonDrivers(year) : Promise.resolve(seasonDrivers[year]),
+        needsC ? api.getSeasonCircuits(year) : Promise.resolve(seasonCircuits[year]),
+      ])
+      if (needsD) setSeasonDrivers(year, d)
+      if (needsC) setSeasonCircuits(year, c)
+    } catch { /* leave empty */ }
+    finally { setLoadingSeason(false) }
+  }, [seasonDrivers, seasonCircuits, setSeasonDrivers, setSeasonCircuits])
+
+  useEffect(() => { void fetchSeasonData(form.year) }, []) // eslint-disable-line
+
+  const handleYearChange = useCallback(async (newYear: number) => {
+    await fetchSeasonData(newYear)
+    setForm(prev => ({
+      ...prev,
+      year: newYear,
+      circuit: (seasonCircuits[newYear] ?? []).some(c => c.name === prev.circuit) ? prev.circuit : '',
+      driver: (seasonDrivers[newYear] ?? []).some(d => d.code === prev.driver) ? prev.driver : '',
+      startingPosition: 1,
+    }))
+    setGrid([])
+  }, [fetchSeasonData, seasonCircuits, seasonDrivers])
+
+  const fetchGrid = useCallback(async (circuit: string, year: number) => {
+    if (!circuit) return
+    setLoadingGrid(true)
+    try { setGrid(await api.getHistoricalGrid(year, circuit)) }
+    catch { setGrid([]) }
+    finally { setLoadingGrid(false) }
+  }, [])
+
+  useEffect(() => {
+    if (form.circuit && form.year) void fetchGrid(form.circuit, form.year)
+  }, [form.circuit, form.year, fetchGrid])
+
+  useEffect(() => {
+    if (!form.driver || grid.length === 0) return
+    const pos = grid.indexOf(form.driver)
+    if (pos !== -1) setForm(prev => ({ ...prev, startingPosition: pos + 1 }))
+  }, [form.driver, grid])
+
+  function buildGridParams() {
+    let startingGrid = grid.length > 0 ? [...grid] : activeDrivers.map(d => d.code).slice(0, 20)
+    // GridRaceEnv requires exactly 20 drivers — pad from season roster if historical grid is short
+    if (startingGrid.length < 20) {
+      const extra = activeDrivers.map(d => d.code).filter(c => !startingGrid.includes(c))
+      startingGrid = [...startingGrid, ...extra].slice(0, 20)
+    }
+    startingGrid = startingGrid.slice(0, 20)
+    const startingCompounds: Record<string, string> = {}
+    for (const driver of startingGrid) {
+      startingCompounds[driver] = driver === form.driver ? form.startingCompound : 'SOFT'
+    }
+    return { startingGrid, startingCompounds }
+  }
+
+  const canSubmit = !!form.circuit && !!form.driver
+
+  async function handleRecommend() {
+    setIsLoading(true); setError(null)
+    const { startingGrid, startingCompounds } = buildGridParams()
+    try {
+      const res = await api.optimizerRecommend({
+        ego_driver: form.driver,
+        circuit: form.circuit,
+        year: form.year,
+        ego_starting_position: form.startingPosition,
+        starting_compound: form.startingCompound,
+        total_laps: totalLaps,
+        starting_grid: startingGrid,
+        starting_compounds: startingCompounds,
+      })
+      setResult({
+        mode: 'recommend',
+        ego_driver: res.ego_driver,
+        final_position: res.predicted_finish_position,
+        race_time_s: res.race_time_s,
+        positions_gained: res.positions_gained,
+        pit_stops: res.recommended_strategy,
+        lap_by_lap: res.ego_lap_by_lap,
+        rival_predictions: res.rival_predictions,
+        undercut_windows: res.undercut_windows_identified,
+        confidence: res.confidence,
+        strategy_rationale: res.strategy_rationale,
+        total_laps: totalLaps,
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Optimizer failed')
+    } finally { setIsLoading(false) }
+  }
+
+  async function handleSimulate(pitStops: Array<{ lap: number; compound: string }>) {
+    setShowModal(false); setIsLoading(true); setError(null)
+    const { startingGrid, startingCompounds } = buildGridParams()
+    try {
+      const res = await api.optimizerSimulate({
+        ego_driver: form.driver,
+        circuit: form.circuit,
+        year: form.year,
+        ego_starting_position: form.startingPosition,
+        starting_compound: form.startingCompound,
+        total_laps: totalLaps,
+        starting_grid: startingGrid,
+        starting_compounds: startingCompounds,
+        pit_stops: pitStops,
+      })
+      setResult({
+        mode: 'simulate',
+        ego_driver: res.ego_driver,
+        final_position: res.ego_predicted_position,
+        race_time_s: res.ego_race_time_s,
+        positions_gained: res.positions_gained,
+        pit_stops: res.ego_strategy,
+        lap_by_lap: res.ego_lap_by_lap,
+        rival_predictions: res.rival_predictions,
+        undercut_windows: res.undercut_windows_identified,
+        total_laps: totalLaps,
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Simulation failed')
+    } finally { setIsLoading(false) }
+  }
+
+  const stints = result ? buildStints(result.lap_by_lap) : []
+  const chartData = result?.lap_by_lap.map(l => ({
+    lap: l.lap, time: +l.lap_time.toFixed(3),
+    compound: l.compound, tire_age: l.tire_age, position: l.position,
+  })) ?? []
+  const gridChartData = result
+    ? buildGridChartData(result.ego_driver, result.lap_by_lap, result.rival_predictions, result.total_laps)
+    : []
+
+  return (
+    <div style={{ minHeight: '100vh', background: 'var(--color-bg)', display: 'flex', flexDirection: 'column' }}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+      {/* Nav */}
+      <nav style={{ display: 'flex', alignItems: 'center', gap: 32, padding: '16px 32px', borderBottom: 'var(--border)', background: 'var(--color-surface)', flexShrink: 0 }}>
+        <button onClick={() => navigate('/')} style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 900, letterSpacing: '0.1em', color: 'var(--color-text)', background: 'none', border: 'none', cursor: 'pointer' }}>
+          PIT<span style={{ color: 'var(--color-accent)' }}>IQ</span>
+        </button>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-dim)', letterSpacing: '0.15em' }}>
+          OPTIMIZER MODE
+        </span>
+        <button onClick={() => navigate('/sandbox')} style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
+          SANDBOX →
+        </button>
+      </nav>
+
+      {/* Body */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+        {/* Left panel — 35% */}
+        <div style={{ width: '35%', flexShrink: 0, borderRight: 'var(--border)', overflowY: 'auto', padding: 28, display: 'flex', flexDirection: 'column', gap: 28 }}>
+
+          {/* Step 1 */}
+          <div>
+            <SectionLabel n={1} label="Race Selection" />
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <div style={{ flex: 1 }}>
+                <FieldLabel>Circuit</FieldLabel>
+                <StyledSelect
+                  value={form.circuit}
+                  onChange={e => setForm(prev => ({ ...prev, circuit: e.target.value, driver: '', startingPosition: 1 }))}
+                  placeholder={loadingSeason ? 'Loading…' : 'Select circuit'}
+                  disabled={loadingSeason}
+                >
+                  {activeCircuits.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                </StyledSelect>
+              </div>
+              <div style={{ width: 90 }}>
+                <FieldLabel>Year</FieldLabel>
+                <StyledSelect value={form.year} onChange={e => { void handleYearChange(Number(e.target.value)) }}>
+                  {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                </StyledSelect>
+              </div>
+            </div>
+            {circuitInfo && (
+              <div style={{ background: 'var(--color-surface-2)', padding: '10px 12px', display: 'flex', gap: 20 }}>
+                {[
+                  { label: 'Length', value: `${circuitInfo.length_km} km` },
+                  { label: 'Laps', value: circuitInfo.total_laps_typical },
+                  { label: 'Type', value: circuitInfo.circuit_type },
+                ].map(m => (
+                  <div key={m.label}>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{m.label}</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text)', fontWeight: 600 }}>{m.value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Step 2 */}
+          <div>
+            <SectionLabel n={2} label="Ego Driver" />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <FieldLabel>Driver</FieldLabel>
+                <StyledSelect
+                  value={form.driver}
+                  onChange={e => setForm(prev => ({ ...prev, driver: e.target.value }))}
+                  placeholder={loadingSeason ? 'Loading…' : 'Select driver'}
+                  disabled={loadingSeason}
+                >
+                  {activeDrivers.map(d => <option key={d.code} value={d.code}>{d.code} — {d.full_name}</option>)}
+                </StyledSelect>
+              </div>
+              <div style={{ width: 80 }}>
+                <FieldLabel>Grid Pos</FieldLabel>
+                <input
+                  type="number" min={1} max={20} value={form.startingPosition}
+                  onChange={e => setForm(prev => ({ ...prev, startingPosition: Math.max(1, Math.min(20, Number(e.target.value))) }))}
+                  style={{ width: '100%', padding: '8px 10px', background: 'var(--color-surface-2)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none' }}
+                />
+              </div>
+            </div>
+            {loadingGrid && (
+              <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>Loading grid…</div>
+            )}
+          </div>
+
+          {/* Step 3 */}
+          <div>
+            <SectionLabel n={3} label="Starting Compound" />
+            <CompoundButtons value={form.startingCompound} onChange={c => setForm(prev => ({ ...prev, startingCompound: c }))} />
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button
+              onClick={() => void handleRecommend()}
+              disabled={!canSubmit || isLoading}
+              style={{ padding: '12px', background: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-surface-2)', border: 'none', color: '#fff', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed', transition: 'background 0.1s' }}
+            >
+              OPTIMIZE STRATEGY
+            </button>
+            <button
+              onClick={() => setShowModal(true)}
+              disabled={!canSubmit || isLoading}
+              style={{ padding: '12px', background: 'none', border: canSubmit && !isLoading ? '1px solid var(--color-accent)' : 'var(--border)', color: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed' }}
+            >
+              SIMULATE MY STRATEGY
+            </button>
+            {error && (
+              <div style={{ padding: '8px 10px', background: 'rgba(232,0,45,0.08)', border: '1px solid rgba(232,0,45,0.3)', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-accent)', letterSpacing: '0.05em' }}>
+                {error}
+              </div>
+            )}
+          </div>
+
+          {/* Info */}
+          <div style={{ padding: '10px 12px', background: 'var(--color-surface-2)', border: 'var(--border)' }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.1em', lineHeight: 1.7 }}>
+              Full 20-car simulation. Rivals modeled with behavior-cloned style policies. Undercut &amp; overcut windows detected automatically.
+            </div>
+          </div>
+        </div>
+
+        {/* Right panel — 65% */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: 28 }}>
+          {isLoading ? (
+            <div style={{ height: '100%', minHeight: 400, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+              <div style={{ width: 36, height: 36, border: '2px solid var(--color-border)', borderTopColor: 'var(--color-accent)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-dim)', letterSpacing: '0.2em' }}>
+                {LOADING_MESSAGES[loadingMsgIdx]}
+              </span>
+            </div>
+          ) : result ? (
+            <ResultsView result={result} stints={stints} chartData={chartData} gridChartData={gridChartData} />
+          ) : (
+            <Placeholder />
+          )}
+        </div>
+      </div>
+
+      {showModal && (
+        <SimulateModal
+          totalLaps={totalLaps}
+          startingCompound={form.startingCompound}
+          onSubmit={pitStops => void handleSimulate(pitStops)}
+          onClose={() => setShowModal(false)}
+        />
+      )}
     </div>
   )
 }

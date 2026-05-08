@@ -44,9 +44,11 @@ export const api = {
   getHistoricalRace: (year: number, circuit: string) =>
     get<HistoricalRace>(`/api/historical/${year}/${encodeURIComponent(circuit)}`),
   getHistoricalGrid: (year: number, circuit: string) =>
-    get<{ grid: string[]; compounds: Record<string, string> }>(
-      `/api/historical/${year}/${encodeURIComponent(circuit)}/grid`,
-    ),
+    get<string[]>(`/api/historical/${year}/${encodeURIComponent(circuit)}/grid`),
+
+  // ── Season-aware endpoints ─────────────────────────────────────────────────
+  getSeasonDrivers: (year: number) => get<DriverInfo[]>(`/api/season/${year}/drivers`),
+  getSeasonCircuits: (year: number) => get<CircuitInfo[]>(`/api/season/${year}/circuits`),
 
   // ── Sandbox endpoints ──────────────────────────────────────────────────────
   getDegradationCurve: (req: DegradationCurveRequest) =>

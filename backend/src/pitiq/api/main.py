@@ -167,7 +167,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -710,6 +710,46 @@ def _run_simulate_sync(
     }
 
 
+def _validate_and_fix_strategy(
+    strategy: list[dict],
+    starting_compound: str,
+    total_laps: int,
+) -> tuple[list[dict], bool]:
+    """Ensure PPO output satisfies the two-compound rule. Returns (strategy, overridden)."""
+    cliff_lap = COMPOUND_CLIFF_LAP.get(starting_compound, 25)
+
+    # Fix 1: agent never pitted
+    if len(strategy) == 0:
+        fallback = "HARD" if starting_compound != "HARD" else "MEDIUM"
+        pit_lap = min(cliff_lap - 2, total_laps - 10)
+        strategy = [{"lap": max(2, pit_lap), "compound": fallback}]
+        return strategy, True
+
+    # Fix 2: only one compound used across entire race
+    compounds_used = {starting_compound} | {s["compound"] for s in strategy}
+    if len(compounds_used) < 2:
+        fallback = "HARD" if starting_compound == "SOFT" else "SOFT"
+        strategy = list(strategy) + [{"lap": total_laps - 8, "compound": fallback}]
+        return strategy, True
+
+    return strategy, False
+
+
+_PPO_MODERATE = frozenset({
+    "Italian Grand Prix",
+    "Belgian Grand Prix",
+    "Abu Dhabi Grand Prix",
+    "Australian Grand Prix",
+})
+
+def _ppo_note(circuit: str) -> str:
+    if circuit == "Bahrain Grand Prix":
+        return "PPO agent trained extensively on this circuit."
+    if circuit in _PPO_MODERATE:
+        return "PPO agent has moderate familiarity with this circuit."
+    return "PPO agent has limited training on this circuit — recommendation may be adjusted."
+
+
 def _run_recommend_sync(
     driver: str,
     circuit: str,
@@ -751,11 +791,15 @@ def _run_recommend_sync(
         lap_num += 1
 
     env.close()
+
+    pit_stops, overridden = _validate_and_fix_strategy(pit_stops, starting_compound, total_laps)
+
     return {
         "recommended_pit_stops": pit_stops,
         "final_position":        int(info.get("position", 20)),
         "race_time_s":           round(float(info.get("cumulative_race_time", 0.0)), 1),
         "lap_by_lap":            lap_by_lap,
+        "strategy_overridden":   overridden,
     }
 
 
@@ -844,6 +888,24 @@ async def get_historical_grid(year: int, circuit_name: str) -> list[str]:
     return _build_grid(race)
 
 
+@app.get("/api/season/{year}/drivers", response_model=list[DriverInfo])
+async def get_season_drivers(year: int) -> list[DriverInfo]:
+    df = app.state.lap_features
+    codes = df[df["Year"] == year]["Driver"].dropna().unique().tolist()
+    styles = app.state.driver_styles
+    drivers = [_driver_info(code) for code in codes if code in styles.index]
+    drivers.sort(key=lambda d: (d.style_vector.get("overall_pace_rank") or 99.0))
+    return drivers
+
+
+@app.get("/api/season/{year}/circuits", response_model=list[CircuitInfo])
+async def get_season_circuits(year: int) -> list[CircuitInfo]:
+    df = app.state.lap_features
+    names = df[df["Year"] == year]["EventName"].dropna().unique().tolist()
+    circuits = [_circuit_info(name) for name in names if name in _CIRCUIT_META]
+    return sorted(circuits, key=lambda c: c.name)
+
+
 # ── Phase 6.2 — Sandbox inference endpoints ───────────────────────────────────
 
 @app.post("/api/sandbox/degradation-curve", response_model=DegradationCurveResponse)
@@ -907,6 +969,16 @@ async def sandbox_simulate(req: SimulateRequest) -> SimulateResponse:
             year=year,
         ),
     )
+
+    # Position gain sanity cap — static rival model cannot model counter-strategies
+    starting_pos = req.starting_position
+    max_realistic_gain = int((20 - starting_pos) * 0.4)
+    raw_gain = starting_pos - result["final_position"]
+    position_capped = raw_gain > max_realistic_gain
+    if position_capped:
+        result["final_position"] = starting_pos - max_realistic_gain
+    result["position_capped"] = position_capped
+
     return SimulateResponse(**result)
 
 
@@ -930,6 +1002,8 @@ async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
             ppo_model=ppo_model,
         ),
     )
+    result["confidence"] = _confidence(circuit)
+    result["ppo_note"]   = _ppo_note(circuit)
     return PPORecommendResponse(**result)
 
 

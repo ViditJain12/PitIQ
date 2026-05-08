@@ -81,6 +81,7 @@ export interface SimulateResponse {
   race_time_s: number
   pit_stops_executed: PitStop[]
   lap_by_lap: LapData[]
+  position_capped: boolean
 }
 
 export interface PPORecommendRequest {
@@ -97,6 +98,9 @@ export interface PPORecommendResponse {
   final_position: number
   race_time_s: number
   lap_by_lap: LapData[]
+  confidence: string
+  strategy_overridden: boolean
+  ppo_note: string
 }
 
 // ── Phase 6.3 ─────────────────────────────────────────────────────────────────

@@ -87,6 +87,7 @@ class SimulateResponse(BaseModel):
     race_time_s: float
     pit_stops_executed: list[PitStop]
     lap_by_lap: list[LapData]
+    position_capped: bool
 
 
 class PPORecommendRequest(BaseModel):
@@ -103,6 +104,9 @@ class PPORecommendResponse(BaseModel):
     final_position: int
     race_time_s: float
     lap_by_lap: list[LapData]
+    confidence: str
+    strategy_overridden: bool
+    ppo_note: str
 
 
 # ── Phase 6.3 — Optimizer Mode schemas ───────────────────────────────────────

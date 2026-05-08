@@ -10,6 +10,8 @@ interface AppState {
   selectedDriver: string | null
   selectedYear: number
   selectedMode: Mode
+  seasonDrivers: Record<number, DriverInfo[]>
+  seasonCircuits: Record<number, CircuitInfo[]>
 
   setCircuits: (c: CircuitInfo[]) => void
   setDrivers: (d: DriverInfo[]) => void
@@ -17,6 +19,8 @@ interface AppState {
   setSelectedDriver: (code: string | null) => void
   setSelectedYear: (y: number) => void
   setSelectedMode: (m: Mode) => void
+  setSeasonDrivers: (year: number, drivers: DriverInfo[]) => void
+  setSeasonCircuits: (year: number, circuits: CircuitInfo[]) => void
 }
 
 export const useStore = create<AppState>(set => ({
@@ -26,6 +30,8 @@ export const useStore = create<AppState>(set => ({
   selectedDriver: null,
   selectedYear: 2024,
   selectedMode: 'sandbox',
+  seasonDrivers: {},
+  seasonCircuits: {},
 
   setCircuits: (circuits) => set({ circuits }),
   setDrivers: (drivers) => set({ drivers }),
@@ -33,4 +39,8 @@ export const useStore = create<AppState>(set => ({
   setSelectedDriver: (selectedDriver) => set({ selectedDriver }),
   setSelectedYear: (selectedYear) => set({ selectedYear }),
   setSelectedMode: (selectedMode) => set({ selectedMode }),
+  setSeasonDrivers: (year, drivers) =>
+    set(s => ({ seasonDrivers: { ...s.seasonDrivers, [year]: drivers } })),
+  setSeasonCircuits: (year, circuits) =>
+    set(s => ({ seasonCircuits: { ...s.seasonCircuits, [year]: circuits } })),
 }))

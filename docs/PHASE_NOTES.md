@@ -940,3 +940,34 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 4. **SIMULATE MY STRATEGY "Failed to fetch":** Same root cause as (3) — the position mismatch raised a `ValueError` in the thread-pool executor, which aborted the response before headers were sent, surfacing as a network-level fetch failure rather than an HTTP 500.
 
 **Open:** Phase 8.3 — Historical Race page + overall polish.
+
+---
+
+## Phase 9.1 — Historical Validation Page (2026-05-09)
+
+**Goal:** Full Historical Validation page at `/historical` — compare PitIQ's GridRaceEnv simulation against actual race results for any race in the 2021–2025 dataset.
+
+**What was built:**
+
+- Full-width layout (no sidebar). Year + circuit dropdowns with season-aware filtering. "RUN SIMULATION" trigger → `GET /api/optimizer/historical-validation/{year}/{circuit}`.
+- Loading state: "SIMULATING {year} {circuit} AGAINST ACTUAL RESULTS…" with scan-bar.
+- Accuracy stat cards: % within ±3 positions, % within ±5 positions, mean absolute delta — all color-coded via `valueColor` prop on `StatCard` (≥60% green, 40–60% yellow, <40% red).
+- Color-coded delta badges: exact → green "✓", ±1–2 → green, ±3 → yellow, ±4–5 → orange, >5 → red "±N ✗".
+- Side-by-side results table (`ResultRow`): actual result on left, simulated on right with delta badge.
+- `LargeDeltaCallout` for drivers with |delta| > 3. Looks up `KNOWN_INCIDENTS[raceKey][driverCode]` for race-specific notes (RIC 2024 Bahrain pace model caveat, RUS/VER/NOR 2024 Austrian GP chaos, HAM/NOR 2024 British GP safety car, LEC 2024 Monaco). Falls back to generic "safety cars, mechanical failures, and incidents are not modeled" text for unlisted drivers.
+- `CHAOTIC_RACE_NOTES` dict: yellow banner shown on circuit select (before running) for known high-variance races (Austrian 2024, British 2024). Banner explains the race was chaotic so simulation accuracy will be lower.
+- Context note below table: "This simulation runs once — expected accuracy is 55–70% within ±3 positions per run."
+- Navigation: HISTORICAL → link added to Sandbox and Optimizer navbars. Landing page updated from 2-column (SANDBOX + OPTIMIZER) to 3-column (+ HISTORICAL) mode cards.
+
+**Test result (2024 Austrian GP):** 50% within ±3, 80% within ±5, mean |delta| ~2.1. Chaotic race banner correctly shown. KNOWN_INCIDENTS notes shown for RUS, VER, NOR.
+
+**Worked well:**
+- `KNOWN_INCIDENTS` dict pattern: keyed by `"${year}_${circuit}"` so adding new race-specific notes requires only two lines. Generic fallback means the callout is always populated.
+- `valueColor` prop on `StatCard` (added Phase 9.1) made color-coded accuracy cards trivial — one prop, no new component.
+- Chaotic race banner on select (not on result) sets user expectations before the simulation runs — better UX than surprising them with a low accuracy number.
+
+**Pain points:**
+- Single-seed variance: historical validation backend runs one GridRaceEnv seed per call (~448ms). RESULTS.md 70% figure is a 5-seed average. Per-call results are 55–70%, which surprised during testing. Accepted with an honest context note in UI — running 5 seeds would be ~2.2s.
+- Circuit name matching: `KNOWN_INCIDENTS` and `CHAOTIC_RACE_NOTES` keys must match the circuit string returned by the API (e.g. `"Austrian Grand Prix"` not `"Austria"`). Verified against `/api/circuits` response.
+
+**Open:** Phase 10 — Polish + deploy.

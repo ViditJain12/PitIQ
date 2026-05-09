@@ -475,16 +475,14 @@ export default function Sandbox() {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-dim)', letterSpacing: '0.15em' }}>
           SANDBOX MODE
         </span>
-        <button
-          onClick={() => navigate('/optimizer')}
-          style={{
-            marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10,
-            color: 'var(--color-text-muted)', background: 'none', border: 'none',
-            cursor: 'pointer', letterSpacing: '0.12em',
-          }}
-        >
-          OPTIMIZER →
-        </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 20 }}>
+          <button onClick={() => navigate('/optimizer')} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
+            OPTIMIZER →
+          </button>
+          <button onClick={() => navigate('/historical')} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
+            HISTORICAL →
+          </button>
+        </div>
       </nav>
 
       {/* Body */}

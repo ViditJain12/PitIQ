@@ -161,10 +161,10 @@ export default function Landing() {
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
+            gridTemplateColumns: '1fr 1fr 1fr',
             gap: 1,
             width: '100%',
-            maxWidth: 720,
+            maxWidth: 1080,
           }}
         >
           <ModeCard
@@ -182,6 +182,14 @@ export default function Landing() {
             tagColor="var(--team-mercedes)"
             cta="RUN OPTIMIZER"
             onClick={() => navigate('/optimizer')}
+          />
+          <ModeCard
+            label="HISTORICAL"
+            description="See how PitIQ's simulation compares against actual race results. Check accuracy across 5 seasons of F1 data."
+            tag="ARCHIVE"
+            tagColor="var(--team-aston)"
+            cta="VIEW HISTORICAL"
+            onClick={() => navigate('/historical')}
           />
         </div>
       </main>

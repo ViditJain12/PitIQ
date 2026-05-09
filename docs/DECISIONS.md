@@ -430,6 +430,18 @@ laps add noise).
 **Why:** A transparent full-screen backdrop div intercepts the pointer event, meaning a click intended for the driver dropdown behind the panel would close the panel but not open the dropdown — the user must click twice. The mousedown-listener pattern lets the click event propagate normally to the underlying element: mousedown closes the panel on pointer-down, then the browser's natural click (mousedown → mouseup → click) fires on the original target. Users can immediately interact with the form after dismissing the panel in one click.
 **Alternatives considered:** Transparent backdrop `div` (rejected: double-click UX issue described above); click listener on document (same timing issue — click fires after mouseup, panel is gone but backdrop may still intercept).
 
+## 2026-05-09 — Historical validation runs single-seed per call (not 5-seed average)
+**Context:** The evaluation harness (Phase 5.3) reports 70% within ±3 as a 5-seed average over GridRaceEnv runs. The historical validation endpoint (`GET /api/optimizer/historical-validation/{year}/{circuit}`) runs a single seed per HTTP call.
+**Decision:** Keep single-seed (one call ≈ 448ms). Display per-call accuracy as-is. Add a context note in the UI: "This simulation runs once — expected accuracy is 55–70% within ±3 positions per run."
+**Why:** 5-seed average would require ~2.2s response time. For a UI that users trigger interactively, 2.2s is unacceptable vs 448ms. The single-seed variance (55–70%) is honest and expected; the context note prevents user confusion when a run comes back at 55%.
+**Alternatives considered:** Running 5 seeds in parallel server-side (rejected: GridRaceEnv is not thread-safe; would require process pool, significantly complicating the backend); caching results per race (rejected: adds complexity, stale results if model is updated).
+
+## 2026-05-09 — KNOWN_INCIDENTS hardcoded dict for large-delta callout
+**Context:** Historical validation shows large position deltas (>3) for certain drivers in certain races. These deltas are not model errors — they result from incidents (mechanical failures, safety cars, contact) that the simulation cannot model.
+**Decision:** Hardcode a `KNOWN_INCIDENTS: Record<string, Record<string, string>>` dict in `Historical.tsx`, keyed by `"${year}_${circuit}"` → driver code → explanation string. Fall back to generic text for any driver/race not in the dict.
+**Why:** The alternative (a backend endpoint returning incident notes) would require maintaining a separate data source and adds API surface for purely cosmetic UI copy. The dict is small (~10 entries), rarely changes (historical races are fixed), and lives next to the component that uses it.
+**Alternatives considered:** Backend endpoint returning incident data (rejected: overkill for static copy); Wikipedia/Ergast API lookup (rejected: adds external dependency and latency for a UI label).
+
 ## 2026-05-08 — Undercut window gap threshold and UI labeling
 **Context:** Backend detects undercut windows where gap to rival ahead is < 1.5s and rival tire age is high. Some flagged windows have gaps < 0.5s which are better described as direct battles than undercut opportunities.
 **Decision:** Display gap < 0.5s as "TIGHT BATTLE" (orange #FF8C00) and gap 0.5–1.5s as "UNDERCUT" (yellow #FFF200). Threshold 0.5s chosen because below this the car is effectively in DRS range — pitting to undercut a car you're already about to pass on track is rarely optimal.

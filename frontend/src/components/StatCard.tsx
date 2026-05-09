@@ -3,9 +3,10 @@ interface StatCardProps {
   label: string
   unit?: string
   accent?: boolean
+  valueColor?: string
 }
 
-export default function StatCard({ value, label, unit, accent = false }: StatCardProps) {
+export default function StatCard({ value, label, unit, accent = false, valueColor }: StatCardProps) {
   return (
     <div
       style={{
@@ -21,7 +22,7 @@ export default function StatCard({ value, label, unit, accent = false }: StatCar
           fontFamily: 'var(--font-mono)',
           fontSize: 28,
           fontWeight: 700,
-          color: accent ? 'var(--color-accent)' : 'var(--color-text)',
+          color: valueColor ?? (accent ? 'var(--color-accent)' : 'var(--color-text)'),
           lineHeight: 1,
           letterSpacing: '-0.02em',
         }}

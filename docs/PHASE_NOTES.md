@@ -927,8 +927,16 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 - **Close behaviour:** X button, Escape key, `document.addEventListener('mousedown', panelRef)` — mousedown closes the panel but allows the original click event to still fire on any form element behind the panel.
 - **Panel layout:** `position: fixed; right: 0; width: min(600px, 100vw)`; slides in/out via `transform: translateX(0|100%)` with 0.25s ease transition. Sits above everything at `z-index: 1000`.
 
-**Worked well:** The `document.addEventListener('mousedown', ...)` pattern (vs a transparent backdrop) was the right call — users can click the driver dropdown immediately after closing the panel without a stale-click miss. Min/max normalisation across active season drivers (not global all-time) means the radar always uses the full 0–1 range even if the selected season has a compressed range of pace ranks.
+**Worked well:** The `document.addEventListener('mousedown', ...)` pattern (vs a transparent backdrop) was the right call — users can click the driver dropdown immediately after closing the panel without a stale-click miss.
 
-**Pain points:** None significant. Wet Skill axis inversion was a one-line norm call with `invert=true`; easy to reason about once the convention was locked (more-negative delta = faster in wet = higher bar).
+**Pain points (fixed post-commit):** Four bugs caught during verification:
+
+1. **Normalization scoped to season drivers (root cause of "similar styles"):** `allDrivers` prop was `seasonDrivers[year]` (~20 drivers). SAI and BEA are both midfield; within the 20-driver season range they both normalise to ~0.5 on every axis, producing visually identical radar shapes. Fix: added `normDrivers` prop (all 33 drivers from `store.drivers` loaded globally at app mount). The radar and metric bars now normalise against the full VER→MAZ spread, so midfield drivers sit at ~0.5 and backmarkers sit at ~0.2–0.3 — visually distinct. `allDrivers` (season-filtered) is retained for the comparison dropdown only.
+
+2. **RadarChart rendering tiny:** No `outerRadius` or `domain` set — Recharts auto-scales to the data max, but the chart itself renders small without an explicit radius. Fixed with `outerRadius={100}`, `height={300}`, wider margins, and a `<PolarRadiusAxis domain={[0, 1]} />` to lock the scale to [0, 1] regardless of data values.
+
+3. **Optimizer position change silently ignored:** `buildGridParams()` used the historical qualifying grid order unmodified. If the user changed `form.startingPosition` from 7 to 3, `ego_starting_position=3` was sent but the ego driver was still at index 6 in `startingGrid`. Backend `GridRaceEnv.reset()` asserts `starting_grid[ego_starting_position - 1] === ego_driver` and raised `ValueError`. Fixed by swapping the ego driver to the user-specified index in `startingGrid` before sending.
+
+4. **SIMULATE MY STRATEGY "Failed to fetch":** Same root cause as (3) — the position mismatch raised a `ValueError` in the thread-pool executor, which aborted the response before headers were sent, surfacing as a network-level fetch failure rather than an HTTP 500.
 
 **Open:** Phase 8.3 — Historical Race page + overall polish.

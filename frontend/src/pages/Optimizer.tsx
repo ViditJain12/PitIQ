@@ -679,6 +679,7 @@ function Placeholder() {
 
 export default function Optimizer() {
   const navigate = useNavigate()
+  const allDrivers = useStore(s => s.drivers)
   const seasonDrivers = useStore(s => s.seasonDrivers)
   const seasonCircuits = useStore(s => s.seasonCircuits)
   const setSeasonDrivers = useStore(s => s.setSeasonDrivers)
@@ -770,6 +771,15 @@ export default function Optimizer() {
       startingGrid = [...startingGrid, ...extra].slice(0, 20)
     }
     startingGrid = startingGrid.slice(0, 20)
+    // Re-seat ego driver at the user-specified position so the grid order matches ego_starting_position.
+    // GridRaceEnv asserts starting_grid[ego_starting_position - 1] === ego_driver.
+    const targetIdx = form.startingPosition - 1
+    const currentIdx = startingGrid.indexOf(form.driver)
+    if (currentIdx !== -1 && currentIdx !== targetIdx && targetIdx >= 0 && targetIdx < startingGrid.length) {
+      const displaced = startingGrid[targetIdx]
+      startingGrid[targetIdx] = form.driver
+      startingGrid[currentIdx] = displaced
+    }
     const startingCompounds: Record<string, string> = {}
     for (const driver of startingGrid) {
       startingCompounds[driver] = driver === form.driver ? form.startingCompound : 'SOFT'
@@ -1018,6 +1028,7 @@ export default function Optimizer() {
         isOpen={showStylePanel}
         egoDriver={activeDrivers.find(d => d.code === form.driver) ?? null}
         allDrivers={activeDrivers}
+        normDrivers={allDrivers.length > 0 ? allDrivers : activeDrivers}
         onClose={() => setShowStylePanel(false)}
       />
     </div>

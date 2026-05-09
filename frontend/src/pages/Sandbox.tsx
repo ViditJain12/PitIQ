@@ -255,6 +255,7 @@ interface FormState {
 
 export default function Sandbox() {
   const navigate = useNavigate()
+  const allDrivers = useStore(s => s.drivers)
   const seasonDrivers = useStore(s => s.seasonDrivers)
   const seasonCircuits = useStore(s => s.seasonCircuits)
   const setSeasonDrivers = useStore(s => s.setSeasonDrivers)
@@ -762,6 +763,7 @@ export default function Sandbox() {
         isOpen={showStylePanel}
         egoDriver={activeDrivers.find(d => d.code === form.driver) ?? null}
         allDrivers={activeDrivers}
+        normDrivers={allDrivers.length > 0 ? allDrivers : activeDrivers}
         onClose={() => setShowStylePanel(false)}
       />
     </div>

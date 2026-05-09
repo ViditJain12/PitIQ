@@ -4,6 +4,7 @@ import {
   Radar,
   PolarGrid,
   PolarAngleAxis,
+  PolarRadiusAxis,
   ResponsiveContainer,
 } from 'recharts'
 import type { DriverInfo } from '../api/types'
@@ -41,13 +42,13 @@ function norm(value: number | null, allVals: (number | null)[], invert = false):
   return invert ? 1 - n : n
 }
 
-function radarNorms(d: DriverInfo, allDrivers: DriverInfo[]): Record<typeof RADAR_AXES[number], number> {
+function radarNorms(d: DriverInfo, normDrivers: DriverInfo[]): Record<typeof RADAR_AXES[number], number> {
   return {
-    'Pace':        norm(sv(d, 'overall_pace_rank'),    allSV(allDrivers, 'overall_pace_rank'), true),
-    'Tire Saving': norm(sv(d, 'tire_saving_coef'),     allSV(allDrivers, 'tire_saving_coef')),
-    'Wet Skill':   norm(sv(d, 'wet_skill_delta'),      allSV(allDrivers, 'wet_skill_delta'), true),
-    'Smoothness':  norm(sv(d, 'throttle_smoothness'),  allSV(allDrivers, 'throttle_smoothness')),
-    'Aggression':  norm(sv(d, 'cornering_aggression'), allSV(allDrivers, 'cornering_aggression')),
+    'Pace':        norm(sv(d, 'overall_pace_rank'),    allSV(normDrivers, 'overall_pace_rank'), true),
+    'Tire Saving': norm(sv(d, 'tire_saving_coef'),     allSV(normDrivers, 'tire_saving_coef')),
+    'Wet Skill':   norm(sv(d, 'wet_skill_delta'),      allSV(normDrivers, 'wet_skill_delta'), true),
+    'Smoothness':  norm(sv(d, 'throttle_smoothness'),  allSV(normDrivers, 'throttle_smoothness')),
+    'Aggression':  norm(sv(d, 'cornering_aggression'), allSV(normDrivers, 'cornering_aggression')),
     'Consistency': 0.5,
   }
 }
@@ -122,17 +123,17 @@ function MetricBar({
 
 // ── DriverColumn ───────────────────────────────────────────────────────────
 
-function DriverColumn({ driver, isEgo, allDrivers }: {
+function DriverColumn({ driver, isEgo, normDrivers }: {
   driver: DriverInfo
   isEgo: boolean
-  allDrivers: DriverInfo[]
+  normDrivers: DriverInfo[]
 }) {
   const accent = isEgo ? 'var(--color-accent)' : 'var(--color-text-muted)'
-  const paceVals  = allSV(allDrivers, 'overall_pace_rank')
-  const tireVals  = allSV(allDrivers, 'tire_saving_coef')
-  const wetVals   = allSV(allDrivers, 'wet_skill_delta')
-  const smoothVals = allSV(allDrivers, 'throttle_smoothness')
-  const aggrVals  = allSV(allDrivers, 'cornering_aggression')
+  const paceVals  = allSV(normDrivers, 'overall_pace_rank')
+  const tireVals  = allSV(normDrivers, 'tire_saving_coef')
+  const wetVals   = allSV(normDrivers, 'wet_skill_delta')
+  const smoothVals = allSV(normDrivers, 'throttle_smoothness')
+  const aggrVals  = allSV(normDrivers, 'cornering_aggression')
 
   function Section({ label }: { label: string }) {
     return (
@@ -208,11 +209,12 @@ function DriverColumn({ driver, isEgo, allDrivers }: {
 interface Props {
   isOpen: boolean
   egoDriver: DriverInfo | null
-  allDrivers: DriverInfo[]
+  allDrivers: DriverInfo[]          // season-filtered list — used for dropdown
+  normDrivers: DriverInfo[]         // full 33-driver roster — used for min/max normalisation
   onClose: () => void
 }
 
-export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, onClose }: Props) {
+export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDrivers, onClose }: Props) {
   const [compCode, setCompCode] = useState<string>('')
   const panelRef = useRef<HTMLDivElement>(null)
 
@@ -247,14 +249,31 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, onClos
 
   const compDriver = allDrivers.find(d => d.code === compCode) ?? null
 
-  // Build radar data
+  // Build radar data — normalise against full 33-driver roster
+  const base = normDrivers.length > 0 ? normDrivers : allDrivers
   const radarData = egoDriver
     ? RADAR_AXES.map(axis => {
-        const egoR = radarNorms(egoDriver, allDrivers)
-        const compR = compDriver ? radarNorms(compDriver, allDrivers) : null
+        const egoR = radarNorms(egoDriver, base)
+        const compR = compDriver ? radarNorms(compDriver, base) : null
         return { axis, ego: egoR[axis], comp: compR ? compR[axis] : 0 }
       })
     : []
+
+  // Debug logging for SAI and BEA
+  if (egoDriver && compDriver) {
+    const debugCodes = new Set(['SAI', 'BEA'])
+    const debugDrivers = [egoDriver, compDriver].filter(d => debugCodes.has(d.code))
+    if (debugDrivers.length > 0) {
+      debugDrivers.forEach(d => {
+        const r = radarNorms(d, base)
+        console.log(`[StylePanel] ${d.code} raw pace_rank=${sv(d, 'overall_pace_rank')} tire_saving=${sv(d, 'tire_saving_coef')}`)
+        console.log(`[StylePanel] ${d.code} normalised:`, r)
+      })
+      const paceDiff = (compDriver.style_vector['overall_pace_rank'] ?? 0) - (egoDriver.style_vector['overall_pace_rank'] ?? 0)
+      const tireDiff = (egoDriver.style_vector['tire_saving_coef'] ?? 0) - (compDriver.style_vector['tire_saving_coef'] ?? 0)
+      console.log(`[StylePanel] generateInsight paceDiff=${paceDiff.toFixed(3)} tireDiff=${tireDiff.toFixed(5)} normBase size=${base.length}`)
+    }
+  }
 
   return (
     <div
@@ -307,13 +326,14 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, onClos
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
               Style Comparison
             </div>
-            <ResponsiveContainer width="100%" height={240}>
-              <RadarChart data={radarData} margin={{ top: 10, right: 36, bottom: 10, left: 36 }}>
+            <ResponsiveContainer width="100%" height={300}>
+              <RadarChart data={radarData} outerRadius={100} margin={{ top: 16, right: 48, bottom: 16, left: 48 }}>
                 <PolarGrid stroke="var(--color-border)" />
                 <PolarAngleAxis
                   dataKey="axis"
-                  tick={{ fill: 'var(--color-text-muted)', fontSize: 9, fontFamily: 'var(--font-mono)' }}
+                  tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
                 />
+                <PolarRadiusAxis domain={[0, 1]} tick={false} axisLine={false} />
                 {compDriver && (
                   <Radar
                     name={compDriver.code}
@@ -359,9 +379,9 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, onClos
 
           {/* Two-column driver details */}
           <div style={{ display: 'flex', gap: 20 }}>
-            <DriverColumn driver={egoDriver} isEgo={true} allDrivers={allDrivers} />
+            <DriverColumn driver={egoDriver} isEgo={true} normDrivers={base} />
             {compDriver && (
-              <DriverColumn driver={compDriver} isEgo={false} allDrivers={allDrivers} />
+              <DriverColumn driver={compDriver} isEgo={false} normDrivers={base} />
             )}
           </div>
         </div>

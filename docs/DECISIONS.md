@@ -412,6 +412,12 @@ laps add noise).
 **Why:** GridRaceEnv's `RivalPrediction` was designed for strategy analysis (pit timing, tire choice), not per-lap telemetry. Adding per-lap position tracking to all 19 rivals would quadruple the response payload and require GridRaceEnv architectural changes. The interpolated trajectory is visually convincing and conveys the strategic narrative (pit drop → recovery → final finish) without being exact.
 **How to apply:** If per-lap rival accuracy becomes important (e.g. for traffic analysis), add `rival_lap_by_lap` to `GridSimulateResponse` and update `RivalPrediction` schema. Until then, use the linear interpolation approach in `interpolateRivalPosition()`.
 
+## 2026-05-09 — DriverStylePanel: normDrivers (33) vs allDrivers (season ~20) split
+**Context:** `DriverStylePanel` needs two different driver lists: one for the comparison dropdown (season-filtered, ~20 drivers) and one for min/max normalization (full roster, 33 drivers). Initial implementation used a single `allDrivers` prop for both, sourced from `seasonDrivers[year]`.
+**Decision:** Add a `normDrivers: DriverInfo[]` prop sourced from `store.drivers` (33 drivers, loaded globally at app mount). Use `normDrivers` for all `norm()` / `allSV()` calls; keep `allDrivers` for the comparison dropdown only. Fall back to `allDrivers` if `normDrivers` is empty (e.g., before the global fetch completes).
+**Why:** Normalizing against ~20 season drivers collapses midfield drivers to ~0.5 on every axis because they're all clustered in the middle of that narrow range. Normalizing against the full 33-driver VER→MAZ spread gives correct proportional placement: VER→1.0 on Pace, MAZ/backmarkers→0.0, midfield→0.4–0.6.
+**How to apply:** Always source `normDrivers` from `store.drivers` (the globally-loaded full driver list). Never use `seasonDrivers[year]` for normalization.
+
 ## 2026-05-09 — Driver style normalisation: min/max per active season roster (not global)
 **Context:** `DriverStylePanel` radar and metric bars need to normalise raw style values (e.g. `overall_pace_rank` ranges 1–33 globally, but a given season may only have 20 drivers with ranks 1–28) to a [0, 1] scale for display.
 **Decision:** Compute min/max from the currently loaded `allDrivers` array (the season-filtered driver list passed as a prop), not from any global constant or all-time dataset.

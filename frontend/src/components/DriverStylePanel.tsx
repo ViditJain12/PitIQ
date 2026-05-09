@@ -259,22 +259,6 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
       })
     : []
 
-  // Debug logging for SAI and BEA
-  if (egoDriver && compDriver) {
-    const debugCodes = new Set(['SAI', 'BEA'])
-    const debugDrivers = [egoDriver, compDriver].filter(d => debugCodes.has(d.code))
-    if (debugDrivers.length > 0) {
-      debugDrivers.forEach(d => {
-        const r = radarNorms(d, base)
-        console.log(`[StylePanel] ${d.code} raw pace_rank=${sv(d, 'overall_pace_rank')} tire_saving=${sv(d, 'tire_saving_coef')}`)
-        console.log(`[StylePanel] ${d.code} normalised:`, r)
-      })
-      const paceDiff = (compDriver.style_vector['overall_pace_rank'] ?? 0) - (egoDriver.style_vector['overall_pace_rank'] ?? 0)
-      const tireDiff = (egoDriver.style_vector['tire_saving_coef'] ?? 0) - (compDriver.style_vector['tire_saving_coef'] ?? 0)
-      console.log(`[StylePanel] generateInsight paceDiff=${paceDiff.toFixed(3)} tireDiff=${tireDiff.toFixed(5)} normBase size=${base.length}`)
-    }
-  }
-
   return (
     <div
       ref={panelRef}

@@ -634,11 +634,13 @@ function ResultsView({
             <YAxis domain={[minT - 0.5, maxT + 0.5]} tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }} axisLine={false} tickLine={false} width={44} tickFormatter={(v: number) => v.toFixed(1)} />
             <Tooltip
               contentStyle={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)' }}
-              formatter={(value: number, _: string, props: { payload?: { compound?: string; tire_age?: number } }) => [
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              formatter={((value: number, _: string, props: { payload?: { compound?: string; tire_age?: number } }) => [
                 `${value.toFixed(3)}s`,
                 `${props.payload?.compound ?? ''} (age ${props.payload?.tire_age ?? 0})`,
-              ]}
-              labelFormatter={(lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`}
+              ]) as any}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              labelFormatter={((lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`) as any}
             />
             <Line dataKey="time" stroke="var(--color-text)" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: 'var(--color-accent)', stroke: 'none' }} />
           </ComposedChart>

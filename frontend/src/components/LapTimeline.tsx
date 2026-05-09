@@ -64,11 +64,13 @@ export default function LapTimeline({ lapData, pitStops = [], height = 160 }: La
             fontSize: 11,
             color: 'var(--color-text)',
           }}
-          formatter={(value: number, _name: string, props: { payload?: { compound?: string } }) => [
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          formatter={((value: number, _name: string, props: { payload?: { compound?: string } }) => [
             `${value.toFixed(3)}s`,
             props.payload?.compound ?? 'LAP TIME',
-          ]}
-          labelFormatter={(lap: number) => `Lap ${lap}`}
+          ]) as any}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          labelFormatter={((lap: number) => `Lap ${lap}`) as any}
         />
         {pitStops.map(p => (
           <ReferenceLine

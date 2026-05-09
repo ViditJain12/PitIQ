@@ -34,8 +34,9 @@ notebooks/.ipynb_checkpoints/
 htmlcov/
 .coverage
 
-# macOS
+# macOS / Windows
 .DS_Store
+Thumbs.db
 
 # Node / frontend
 frontend/node_modules/

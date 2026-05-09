@@ -852,7 +852,7 @@ function Placeholder() {
 // ── ResultView ─────────────────────────────────────────────────────────────
 
 function ResultView({
-  result, stints, chartData, startingPosition, positionsGained, totalLaps, mode,
+  result, stints, chartData, startingPosition: _startingPosition, positionsGained, totalLaps, mode,
   confidence, strategyOverridden, ppoNote, positionCapped,
 }: {
   result: SandboxResult
@@ -1053,11 +1053,13 @@ function ResultView({
                 borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11,
                 color: 'var(--color-text)',
               }}
-              formatter={(value: number, _: string, props: { payload?: { compound?: string; tire_age?: number; position?: number } }) => [
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              formatter={((value: number, _: string, props: { payload?: { compound?: string; tire_age?: number; position?: number } }) => [
                 `${value.toFixed(3)}s`,
                 `${props.payload?.compound ?? ''} (age ${props.payload?.tire_age ?? 0})`,
-              ]}
-              labelFormatter={(lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`}
+              ]) as any}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              labelFormatter={((lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`) as any}
             />
             <Line
               dataKey="time"

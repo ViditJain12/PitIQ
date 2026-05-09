@@ -16,6 +16,7 @@ import { useStore } from '../store'
 import type { LapData, RivalPrediction, UndercutWindow } from '../api/types'
 import TireBadge from '../components/TireBadge'
 import StatCard from '../components/StatCard'
+import DriverStylePanel from '../components/DriverStylePanel'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
@@ -693,6 +694,7 @@ export default function Optimizer() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showModal, setShowModal] = useState(false)
+  const [showStylePanel, setShowStylePanel] = useState(false)
   const [loadingMsgIdx, setLoadingMsgIdx] = useState(0)
   const loadingInterval = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -926,6 +928,14 @@ export default function Optimizer() {
                 >
                   {activeDrivers.map(d => <option key={d.code} value={d.code}>{d.code} — {d.full_name}</option>)}
                 </StyledSelect>
+                {form.driver && (
+                  <button
+                    onClick={() => setShowStylePanel(true)}
+                    style={{ marginTop: 5, background: 'none', border: 'none', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: 'var(--color-accent)', cursor: 'pointer', textTransform: 'uppercase' }}
+                  >
+                    View Style →
+                  </button>
+                )}
               </div>
               <div style={{ width: 80 }}>
                 <FieldLabel>Grid Pos</FieldLabel>
@@ -1003,6 +1013,13 @@ export default function Optimizer() {
           onClose={() => setShowModal(false)}
         />
       )}
+
+      <DriverStylePanel
+        isOpen={showStylePanel}
+        egoDriver={activeDrivers.find(d => d.code === form.driver) ?? null}
+        allDrivers={activeDrivers}
+        onClose={() => setShowStylePanel(false)}
+      />
     </div>
   )
 }

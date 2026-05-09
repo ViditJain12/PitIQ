@@ -16,6 +16,7 @@ import type { LapData, PitStop, SimulateResponse, PPORecommendResponse } from '.
 import StatCard from '../components/StatCard'
 import TireBadge from '../components/TireBadge'
 import LoadingState from '../components/LoadingState'
+import DriverStylePanel from '../components/DriverStylePanel'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
@@ -273,6 +274,7 @@ export default function Sandbox() {
   const [result, setResult] = useState<SandboxResult | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showStylePanel, setShowStylePanel] = useState(false)
 
   // ── season-aware dropdown data ─────────────────────────────────────────
 
@@ -560,6 +562,14 @@ export default function Sandbox() {
                     <option key={d.code} value={d.code}>{d.code} — {d.full_name}</option>
                   ))}
                 </Select>
+                {form.driver && (
+                  <button
+                    onClick={() => setShowStylePanel(true)}
+                    style={{ marginTop: 5, background: 'none', border: 'none', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: 'var(--color-accent)', cursor: 'pointer', textTransform: 'uppercase' }}
+                  >
+                    View Style →
+                  </button>
+                )}
               </div>
               <div style={{ width: 80 }}>
                 <FieldLabel>Grid Pos</FieldLabel>
@@ -747,6 +757,13 @@ export default function Sandbox() {
           )}
         </div>
       </div>
+
+      <DriverStylePanel
+        isOpen={showStylePanel}
+        egoDriver={activeDrivers.find(d => d.code === form.driver) ?? null}
+        allDrivers={activeDrivers}
+        onClose={() => setShowStylePanel(false)}
+      />
     </div>
   )
 }

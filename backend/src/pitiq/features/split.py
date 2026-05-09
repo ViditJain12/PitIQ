@@ -100,6 +100,7 @@ def _verify_no_overlap(
     logger.info("Overlap check passed — no race appears in more than one split")
 
 
+# Write each split DataFrame to its own Parquet file under data/features/.
 def save_splits(splits: dict[str, pd.DataFrame]) -> None:
     _FEATURES_DIR.mkdir(parents=True, exist_ok=True)
     for name, df in splits.items():
@@ -108,6 +109,7 @@ def save_splits(splits: dict[str, pd.DataFrame]) -> None:
         logger.info("Saved %s: %d rows → %s", name, len(df), out)
 
 
+# Build the argument parser for the split CLI.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Race-based train/val/test split.")
     p.add_argument(
@@ -118,6 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# CLI entry point: run split_features, save Parquet files, print summary table.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

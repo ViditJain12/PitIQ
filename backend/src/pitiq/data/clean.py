@@ -40,6 +40,7 @@ DEFAULT_SEASONS = [2021, 2022, 2023, 2024, 2025]
 # Individual cleaning steps
 # ---------------------------------------------------------------------------
 
+# Drop laps FastF1 has flagged as inaccurate (e.g. formation lap, VSC distortion).
 def drop_inaccurate(df: pd.DataFrame) -> pd.DataFrame:
     before = len(df)
     df = df[df["IsAccurate"].astype(bool)].copy()
@@ -143,6 +144,7 @@ def build_combined(
 # CLI
 # ---------------------------------------------------------------------------
 
+# Build the argument parser for the clean CLI.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Clean and combine per-season lap Parquet files.")
     p.add_argument(
@@ -166,6 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# CLI entry point: parse args, run build_combined, print summary.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

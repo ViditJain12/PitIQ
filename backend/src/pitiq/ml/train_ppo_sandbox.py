@@ -1,4 +1,4 @@
-"""Phase 5.1 — Train PPO agent on SandboxRaceEnv with curriculum learning.
+"""Train PPO agent on SandboxRaceEnv with curriculum learning.
 
 Stage 1 (0–300K):  Bahrain · VER · P1 · SOFT — clean single-scenario signal.
 Stage 2 (300K–1M): 4 circuits × 5 drivers × P1–P10 — generalisation.
@@ -69,6 +69,7 @@ _EVAL_OPTIONS: dict[str, Any] = {
 class _Stage1Env(gym.Wrapper):
     """Fixed Stage-1 scenario: Bahrain 2024, VER, P1, SOFT."""
 
+    # Override reset to inject the fixed Stage-1 scenario options.
     def reset(self, **kwargs: Any):
         kwargs["options"] = {
             "circuit":                    "Bahrain Grand Prix",
@@ -85,6 +86,7 @@ class _Stage1Env(gym.Wrapper):
 class _Stage2Env(gym.Wrapper):
     """Randomised Stage-2: 4 circuits × 5 drivers × P1–P10."""
 
+    # Override reset to inject randomly sampled Stage-2 curriculum options.
     def reset(self, **kwargs: Any):
         cfg = random.choice(_TRAIN_CIRCUITS)
         kwargs["options"] = {
@@ -100,25 +102,30 @@ class _Stage2Env(gym.Wrapper):
 class _EvalEnv(gym.Wrapper):
     """Fixed eval scenario: Bahrain 2024, VER, P1, SOFT."""
 
+    # Override reset to inject the fixed evaluation scenario options.
     def reset(self, **kwargs: Any):
         kwargs["options"] = _EVAL_OPTIONS
         return self.env.reset(**kwargs)
 
 
+# Factory function for Stage-1 environments used by make_vec_env.
 def _make_stage1_env() -> gym.Env:
     return Monitor(_Stage1Env(SandboxRaceEnv()))
 
 
+# Factory function for Stage-2 environments used by make_vec_env.
 def _make_stage2_env() -> gym.Env:
     return Monitor(_Stage2Env(SandboxRaceEnv()))
 
 
 # ── Baseline policies ──────────────────────────────────────────────────────────
 
+# Baseline policy that never pits for the entire race.
 def _never_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     return 0
 
 
+# Baseline policy that pits to HARD when the current compound reaches its cliff lap.
 def _cliff_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     tire_age     = float(obs[6])
     compound_idx = int(obs[1:6].argmax())
@@ -127,12 +134,14 @@ def _cliff_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     return 3 if tire_age >= cliff else 0   # pit to HARD at cliff
 
 
+# Baseline policy that samples uniformly from the action space each step.
 def _random_policy(obs: np.ndarray, env: SandboxRaceEnv) -> int:
     return int(env.action_space.sample())
 
 
 # ── Evaluation harness ─────────────────────────────────────────────────────────
 
+# Run a single SandboxRaceEnv episode with the given policy and return summary metrics.
 def _run_episode(policy_fn, seed: int) -> dict:
     env = SandboxRaceEnv()
     obs, _ = env.reset(seed=seed, options=_EVAL_OPTIONS)
@@ -149,6 +158,7 @@ def _run_episode(policy_fn, seed: int) -> dict:
     }
 
 
+# Run n_episodes and aggregate mean reward, position, race time, and win rate.
 def _evaluate(policy_fn, n_episodes: int = 10, seed_offset: int = 0) -> dict:
     rows      = [_run_episode(policy_fn, seed=seed_offset + i) for i in range(n_episodes)]
     rewards   = [r["reward"]         for r in rows]
@@ -216,6 +226,7 @@ def _plot_baseline_comparison(summaries: dict[str, dict], out: Path) -> None:
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
+# Run two-stage PPO curriculum training and save the final and best models.
 def train(total_timesteps: int = 1_000_000) -> None:
     for d in [_MODELS_DIR, _FIGURES_DIR, _LOGS_DIR, _TB_DIR]:
         d.mkdir(parents=True, exist_ok=True)
@@ -316,6 +327,7 @@ def train(total_timesteps: int = 1_000_000) -> None:
     ppo_model = PPO.load(load_path)
     print(f"  Loaded: {load_path}\n")
 
+    # Wrap the loaded PPO model as a deterministic policy callable for evaluation.
     def ppo_policy(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
         action, _ = ppo_model.predict(obs, deterministic=True)
         return int(action)

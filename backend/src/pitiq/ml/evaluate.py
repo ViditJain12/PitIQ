@@ -1,4 +1,4 @@
-"""Phase 5.3 — Comprehensive evaluation harness.
+"""Comprehensive evaluation harness.
 
 Runs 8 test scenarios (4 Sandbox + 4 Grid) x 4 policies x 20 episodes each.
 Loads XGBoost and rival policy meta from JSON, generates 2 plots, saves results JSON.
@@ -180,6 +180,7 @@ GRID_SCENARIOS: list[dict[str, Any]] = [
 
 # ── Sandbox policies ──────────────────────────────────────────────────────────
 
+# Wrap a trained Sandbox PPO model as a callable policy function.
 def _make_sandbox_ppo(model: PPO) -> Callable:
     def _fn(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
         action, _ = model.predict(obs, deterministic=True)
@@ -187,6 +188,7 @@ def _make_sandbox_ppo(model: PPO) -> Callable:
     return _fn
 
 
+# Sandbox baseline that pits to HARD when the current compound reaches its cliff lap.
 def _cliff_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     tire_age     = float(obs[6])
     compound_idx = int(obs[1:6].argmax())
@@ -195,16 +197,19 @@ def _cliff_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     return 3 if tire_age >= cliff else 0
 
 
+# Sandbox baseline that never pits for the entire race.
 def _never_pit(obs: np.ndarray, _env: SandboxRaceEnv) -> int:
     return 0
 
 
+# Sandbox baseline that samples a random action each step.
 def _sandbox_random(obs: np.ndarray, env: SandboxRaceEnv) -> int:
     return int(env.action_space.sample())
 
 
 # ── Grid policies ─────────────────────────────────────────────────────────────
 
+# Wrap a trained Grid PPO model as a callable (obs, lap_num) → action policy function.
 def _make_grid_ppo(model: PPO) -> Callable:
     def _fn(obs: np.ndarray, _lap: int) -> int:
         action, _ = model.predict(obs, deterministic=True)
@@ -220,16 +225,19 @@ def _make_sandbox_ppo_in_grid(model: PPO) -> Callable:
     return _fn
 
 
+# Grid baseline that pits to HARD on lap 18 and stays otherwise.
 def _fixed_lap18(obs: np.ndarray, lap_num: int) -> int:
     return 3 if lap_num == 18 else 0
 
 
+# Grid baseline that samples a random action each lap.
 def _grid_random(obs: np.ndarray, _lap: int) -> int:
     return random.randint(0, 3)
 
 
 # ── Episode runners ───────────────────────────────────────────────────────────
 
+# Run one SandboxRaceEnv episode and return reward, final position, and race time.
 def _run_sandbox_episode(policy_fn: Callable, options: dict, seed: int) -> dict:
     env = SandboxRaceEnv()
     obs, _ = env.reset(seed=seed, options=options)
@@ -246,6 +254,7 @@ def _run_sandbox_episode(policy_fn: Callable, options: dict, seed: int) -> dict:
     }
 
 
+# Run one GridRaceEnv episode and return reward, final ego position, and race time.
 def _run_grid_episode(policy_fn: Callable, options: dict, seed: int) -> dict:
     env = GridRaceEnv()
     obs, _ = env.reset(seed=seed, options=options)
@@ -265,6 +274,7 @@ def _run_grid_episode(policy_fn: Callable, options: dict, seed: int) -> dict:
     }
 
 
+# Aggregate episode result rows into mean/std reward, position, race time, win rate, and positions gained.
 def _aggregate(rows: list[dict], starting_position: int) -> dict:
     rewards    = [r["reward"]         for r in rows]
     positions  = [r["final_position"] for r in rows]
@@ -281,11 +291,13 @@ def _aggregate(rows: list[dict], starting_position: int) -> dict:
     }
 
 
+# Evaluate a sandbox policy over n episodes and return aggregated metrics.
 def _eval_sandbox(policy_fn: Callable, options: dict, n: int = 20) -> dict:
     rows = [_run_sandbox_episode(policy_fn, options, seed=i) for i in range(n)]
     return _aggregate(rows, options["starting_position"])
 
 
+# Evaluate a grid policy over n episodes and return aggregated metrics.
 def _eval_grid(policy_fn: Callable, options: dict, n: int = 20) -> dict:
     rows = [_run_grid_episode(policy_fn, options, seed=i) for i in range(n)]
     return _aggregate(rows, options["ego_starting_position"])
@@ -293,6 +305,7 @@ def _eval_grid(policy_fn: Callable, options: dict, n: int = 20) -> dict:
 
 # ── Plots ─────────────────────────────────────────────────────────────────────
 
+# Apply dark-theme styling to a matplotlib Axes instance.
 def _style_ax(ax: plt.Axes) -> None:
     ax.set_facecolor("#0d1117")
     ax.tick_params(colors="white")
@@ -305,6 +318,7 @@ def _style_ax(ax: plt.Axes) -> None:
         spine.set_edgecolor("#333")
 
 
+# Save a grouped bar chart of mean positions gained per scenario for sandbox and grid modes.
 def _plot_position_gains(all_results: dict, out: Path) -> None:
     scenario_names   = [s["name"] for s in SANDBOX_SCENARIOS]
     sandbox_policies = ["PPO Sandbox", "Cliff-pit", "Never-pit", "Random"]
@@ -346,6 +360,7 @@ def _plot_position_gains(all_results: dict, out: Path) -> None:
     print(f"  Position gains → {out}")
 
 
+# Save a grouped bar chart of mean episode reward per scenario for sandbox and grid modes.
 def _plot_reward_comparison(all_results: dict, out: Path) -> None:
     scenario_names   = [s["name"] for s in SANDBOX_SCENARIOS]
     sandbox_policies = ["PPO Sandbox", "Cliff-pit", "Never-pit", "Random"]
@@ -389,6 +404,7 @@ def _plot_reward_comparison(all_results: dict, out: Path) -> None:
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 
+# Print a formatted results table for all policies in one evaluation scenario.
 def _print_table(scenario_name: str, policy_results: dict[str, dict]) -> None:
     print(f"\n=== {scenario_name} ===")
     hdr = (
@@ -409,6 +425,7 @@ def _print_table(scenario_name: str, policy_results: dict[str, dict]) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# Run all 640 evaluation episodes, print results, save plots and JSON.
 def main() -> None:
     _FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 

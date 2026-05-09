@@ -1,4 +1,4 @@
-"""Phase 5.2 — Train PPO agent on GridRaceEnv with rival-aware 25-dim observation.
+"""Train PPO agent on GridRaceEnv with rival-aware 25-dim observation.
 
 3-stage curriculum:
   Stage 1 (0–200K):    Fixed scenario — Bahrain, VER P1, fixed 2024 qualifying grid.
@@ -157,8 +157,8 @@ def _grid_with_ego(base_grid: list[str], ego_driver: str, ego_pos: int) -> list[
     return grid
 
 
+# Build a GridRaceEnv reset config from a circuit dict + ego spec.
 def _build_cfg(circuit_info: dict, ego_driver: str, ego_pos: int) -> dict[str, Any]:
-    """Build a GridRaceEnv reset config from a circuit dict + ego spec."""
     grid = _grid_with_ego(circuit_info["base_grid"], ego_driver, ego_pos)
     cmp  = circuit_info["starting_compound"]
     return {
@@ -178,6 +178,7 @@ def _build_cfg(circuit_info: dict, ego_driver: str, ego_pos: int) -> dict[str, A
 class _Stage1Env(gym.Wrapper):
     """Fixed scenario — Bahrain 2024, VER P1."""
 
+    # Override reset to inject the fixed Stage-1 Bahrain VER P1 options.
     def reset(self, **kwargs: Any):
         kwargs["options"] = _EVAL_VER_P1
         return self.env.reset(**kwargs)
@@ -186,6 +187,7 @@ class _Stage1Env(gym.Wrapper):
 class _Stage2Env(gym.Wrapper):
     """Bahrain only — 5 ego drivers × P1-P10."""
 
+    # Override reset to inject randomly sampled Stage-2 Bahrain curriculum options.
     def reset(self, **kwargs: Any):
         ego   = random.choice(_EGO_DRIVERS)
         pos   = random.randint(1, 10)
@@ -196,6 +198,7 @@ class _Stage2Env(gym.Wrapper):
 class _Stage3Env(gym.Wrapper):
     """All 4 circuits — 5 ego drivers × P1-P15."""
 
+    # Override reset to inject randomly sampled Stage-3 multi-circuit curriculum options.
     def reset(self, **kwargs: Any):
         info  = random.choice(_TRAIN_CIRCUITS)
         ego   = random.choice(_EGO_DRIVERS)
@@ -207,26 +210,30 @@ class _Stage3Env(gym.Wrapper):
 class _EvalVEREnv(gym.Wrapper):
     """Fixed eval — Bahrain VER P1."""
 
+    # Override reset to inject the fixed VER P1 evaluation scenario options.
     def reset(self, **kwargs: Any):
         kwargs["options"] = _EVAL_VER_P1
         return self.env.reset(**kwargs)
 
 
+# Factory function for Stage-1 GridRaceEnv environments used by make_vec_env.
 def _make_stage1() -> gym.Env:
     return Monitor(_Stage1Env(GridRaceEnv()))
 
 
+# Factory function for Stage-2 GridRaceEnv environments used by make_vec_env.
 def _make_stage2() -> gym.Env:
     return Monitor(_Stage2Env(GridRaceEnv()))
 
 
+# Factory function for Stage-3 GridRaceEnv environments used by make_vec_env.
 def _make_stage3() -> gym.Env:
     return Monitor(_Stage3Env(GridRaceEnv()))
 
 
 # ── Baseline policies ──────────────────────────────────────────────────────────
 
-def _fixed_lap18(obs: np.ndarray, lap_num: int) -> int:
+def _fixed_lap18(_obs: np.ndarray, lap_num: int) -> int:
     """Pit to HARD on lap 18, stay otherwise."""
     return 3 if lap_num == 18 else 0
 
@@ -239,7 +246,8 @@ def _sandbox_ppo_policy(model: PPO):
     return _fn
 
 
-def _random_policy(obs: np.ndarray, lap_num: int) -> int:
+# Baseline policy that samples a random action each lap.
+def _random_policy(_obs: np.ndarray, _lap_num: int) -> int:
     return random.randint(0, 3)
 
 
@@ -264,6 +272,7 @@ def _run_episode(policy_fn, eval_cfg: dict, seed: int) -> dict:
     }
 
 
+# Run n_episodes and aggregate mean reward, mean position, and win count.
 def _evaluate(policy_fn, eval_cfg: dict, n_episodes: int = 10) -> dict:
     rows      = [_run_episode(policy_fn, eval_cfg, seed=i) for i in range(n_episodes)]
     rewards   = [r["reward"]         for r in rows]
@@ -353,6 +362,7 @@ def _plot_baseline_comparison(
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
+# Run three-stage PPO curriculum training on GridRaceEnv and save the final and best models.
 def train(total_timesteps: int = 1_500_000) -> None:
     for d in [_MODELS_DIR, _FIGURES_DIR, _LOGS_DIR, _TB_DIR]:
         d.mkdir(parents=True, exist_ok=True)
@@ -473,7 +483,7 @@ def train(total_timesteps: int = 1_500_000) -> None:
     grid_ppo = PPO.load(load_path)
     print(f"  Loaded: {load_path}\n")
 
-    def grid_ppo_policy(obs: np.ndarray, lap_num: int) -> int:
+    def grid_ppo_policy(obs: np.ndarray, _lap_num: int) -> int:
         action, _ = grid_ppo.predict(obs, deterministic=True)
         return int(action)
 
@@ -482,7 +492,7 @@ def train(total_timesteps: int = 1_500_000) -> None:
     if sandbox_model is None:
         print("  WARNING: ppo_sandbox_best.zip not found — skipping Sandbox PPO baseline")
 
-    def sandbox_ppo_policy(obs: np.ndarray, lap_num: int) -> int:
+    def sandbox_ppo_policy(obs: np.ndarray, _lap_num: int) -> int:
         if sandbox_model is None:
             return 0
         action, _ = sandbox_model.predict(obs[:13], deterministic=True)
@@ -495,6 +505,7 @@ def train(total_timesteps: int = 1_500_000) -> None:
         "Random":         _random_policy,
     }
 
+    # Print a formatted policy comparison table for one evaluation scenario.
     def _print_scenario(title: str, eval_cfg: dict) -> dict[str, dict]:
         print(f"\n=== {title} ===")
         hdr = f"{'Policy':<18} | {'Mean Reward':>11} | {'Mean Pos':>8} | Wins"

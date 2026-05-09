@@ -188,6 +188,7 @@ def ingest_season(year: int, max_races: int | None = None) -> pd.DataFrame:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+# Build the argument parser for the ingest CLI.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Ingest FastF1 lap data for a season.")
     p.add_argument("--season", type=int, required=True, help="Championship year, e.g. 2024")
@@ -207,6 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# CLI entry point: parse args, run ingest_season, print summary.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

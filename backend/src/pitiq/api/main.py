@@ -1,4 +1,4 @@
-"""PitIQ FastAPI application — Phase 6.2: data/lookup + sandbox inference endpoints.
+"""PitIQ FastAPI application — data/lookup and ML inference endpoints.
 
 Run:
     uvicorn pitiq.api.main:app --reload --port 8000
@@ -177,6 +177,7 @@ app.add_middleware(
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
+# Load parquet data, cluster drivers, warm model caches, and store state on app startup.
 @app.on_event("startup")
 async def startup() -> None:
     lap_features   = pd.read_parquet(_DATA_DIR / "lap_features.parquet")
@@ -222,6 +223,7 @@ async def startup() -> None:
     app.state.executor             = executor
 
 
+# Shut down the thread pool executor gracefully on app shutdown.
 @app.on_event("shutdown")
 async def shutdown() -> None:
     app.state.executor.shutdown(wait=False)
@@ -229,6 +231,7 @@ async def shutdown() -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Build a CircuitInfo response object for the given circuit name.
 def _circuit_info(name: str) -> CircuitInfo:
     meta = _CIRCUIT_META[name]
     return CircuitInfo(
@@ -242,6 +245,7 @@ def _circuit_info(name: str) -> CircuitInfo:
     )
 
 
+# Build a DriverInfo response object for the given driver code, raising 404 if not found.
 def _driver_info(code: str) -> DriverInfo:
     styles = app.state.driver_styles
     if code not in styles.index:
@@ -303,6 +307,7 @@ def _reconstruct_strategy(df_winner: pd.DataFrame, min_stint_laps: int = 5) -> l
     return strategy
 
 
+# Return the ordered starting grid as a list of driver codes sorted by first-lap position.
 def _build_grid(df_race: pd.DataFrame) -> list[str]:
     first = df_race.sort_values("LapNumber").groupby("Driver").first().reset_index()
     return (
@@ -310,6 +315,7 @@ def _build_grid(df_race: pd.DataFrame) -> list[str]:
     )
 
 
+# Build a sorted list of result dicts with driver, final position, and starting position.
 def _build_results(df_race: pd.DataFrame) -> list[dict]:
     last  = df_race.sort_values("LapNumber").groupby("Driver").last().reset_index()
     first = df_race.sort_values("LapNumber").groupby("Driver").first().reset_index()
@@ -365,6 +371,7 @@ _GRID_ACTION_COMPOUND: dict[int, str] = {1: "SOFT", 2: "MEDIUM", 3: "HARD"}
 
 # ── Grid helpers ──────────────────────────────────────────────────────────────
 
+# Extract rival driver predictions from a completed GridRaceEnv grid state.
 def _rival_predictions_from_grid(
     grid: list,
     ego_driver: str,
@@ -411,6 +418,7 @@ def _check_undercut_window(env: GridRaceEnv, lap_num: int, action: int) -> dict 
     return None
 
 
+# Generate a natural-language strategy rationale string for the optimizer recommendation.
 def _generate_rationale(
     driver: str,
     circuit: str,
@@ -440,6 +448,7 @@ def _generate_rationale(
     return " ".join(parts)
 
 
+# Run a GridRaceEnv episode with a fixed pit action map and return lap-by-lap results.
 def _run_grid_simulate_sync(
     ego_driver: str,
     circuit: str,
@@ -504,6 +513,7 @@ def _run_grid_simulate_sync(
     }
 
 
+# Run a GridRaceEnv episode using the PPO Grid agent and return the recommended strategy.
 def _run_grid_recommend_sync(
     ego_driver: str,
     circuit: str,
@@ -569,6 +579,7 @@ def _run_grid_recommend_sync(
     }
 
 
+# Simulate a historical race with GridRaceEnv and compare to actual results for accuracy metrics.
 def _run_historical_validation_sync(
     year: int,
     circuit: str,
@@ -662,6 +673,7 @@ def _run_historical_validation_sync(
     }
 
 
+# Run a SandboxRaceEnv episode with a fixed pit action map and return lap-by-lap results.
 def _run_simulate_sync(
     driver: str,
     circuit: str,
@@ -743,6 +755,7 @@ _PPO_MODERATE = frozenset({
     "Australian Grand Prix",
 })
 
+# Return a human-readable note about the PPO agent's familiarity with this circuit.
 def _ppo_note(circuit: str) -> str:
     if circuit == "Bahrain Grand Prix":
         return "PPO agent trained extensively on this circuit."
@@ -751,6 +764,7 @@ def _ppo_note(circuit: str) -> str:
     return "PPO agent has limited training on this circuit — recommendation may be adjusted."
 
 
+# Run a SandboxRaceEnv episode using the PPO Sandbox agent and return the recommended strategy.
 def _run_recommend_sync(
     driver: str,
     circuit: str,
@@ -806,32 +820,38 @@ def _run_recommend_sync(
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+# Return API health status.
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", version="0.1.0")
 
 
+# Return all circuit configurations sorted by name.
 @app.get("/api/circuits", response_model=list[CircuitInfo])
 async def get_circuits() -> list[CircuitInfo]:
     return [_circuit_info(name) for name in sorted(_CIRCUIT_META)]
 
 
+# Return configuration for a single circuit by name (case-insensitive).
 @app.get("/api/circuits/{circuit_name}", response_model=CircuitInfo)
 async def get_circuit(circuit_name: str) -> CircuitInfo:
     name = _find_circuit(circuit_name)
     return _circuit_info(name)
 
 
+# Return all driver info objects sorted by driver code.
 @app.get("/api/drivers", response_model=list[DriverInfo])
 async def get_drivers() -> list[DriverInfo]:
     return [_driver_info(code) for code in sorted(app.state.driver_styles.index)]
 
 
+# Return info for a single driver by three-letter code.
 @app.get("/api/drivers/{driver_code}", response_model=DriverInfo)
 async def get_driver(driver_code: str) -> DriverInfo:
     return _driver_info(driver_code.upper())
 
 
+# Return historical race data including winner strategy, grid, and results for a given year and circuit.
 @app.get("/api/historical/{year}/{circuit_name}", response_model=HistoricalRace)
 async def get_historical_race(year: int, circuit_name: str) -> HistoricalRace:
     circuit = _find_circuit(circuit_name)
@@ -874,6 +894,7 @@ async def get_historical_race(year: int, circuit_name: str) -> HistoricalRace:
     )
 
 
+# Return the starting grid as an ordered list of driver codes for a given year and circuit.
 @app.get("/api/historical/{year}/{circuit_name}/grid", response_model=list[str])
 async def get_historical_grid(year: int, circuit_name: str) -> list[str]:
     circuit = _find_circuit(circuit_name)
@@ -889,6 +910,7 @@ async def get_historical_grid(year: int, circuit_name: str) -> list[str]:
     return _build_grid(race)
 
 
+# Return drivers who competed in a given season, sorted by pace rank.
 @app.get("/api/season/{year}/drivers", response_model=list[DriverInfo])
 async def get_season_drivers(year: int) -> list[DriverInfo]:
     df = app.state.lap_features
@@ -899,6 +921,7 @@ async def get_season_drivers(year: int) -> list[DriverInfo]:
     return drivers
 
 
+# Return circuits included in a given season, sorted alphabetically.
 @app.get("/api/season/{year}/circuits", response_model=list[CircuitInfo])
 async def get_season_circuits(year: int) -> list[CircuitInfo]:
     df = app.state.lap_features
@@ -909,6 +932,7 @@ async def get_season_circuits(year: int) -> list[CircuitInfo]:
 
 # ── Phase 6.2 — Sandbox inference endpoints ───────────────────────────────────
 
+# Return a predicted tire degradation curve for the given driver, circuit, and compound.
 @app.post("/api/sandbox/degradation-curve", response_model=DegradationCurveResponse)
 async def sandbox_degradation_curve(
     req: DegradationCurveRequest,
@@ -943,6 +967,7 @@ async def sandbox_degradation_curve(
     )
 
 
+# Simulate a user-specified pit strategy through SandboxRaceEnv and return lap-by-lap results.
 @app.post("/api/sandbox/simulate", response_model=SimulateResponse)
 async def sandbox_simulate(req: SimulateRequest) -> SimulateResponse:
     circuit    = _find_circuit(req.circuit)
@@ -983,6 +1008,7 @@ async def sandbox_simulate(req: SimulateRequest) -> SimulateResponse:
     return SimulateResponse(**result)
 
 
+# Run the PPO Sandbox agent deterministically and return the recommended strategy.
 @app.post("/api/sandbox/recommend", response_model=PPORecommendResponse)
 async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
     circuit    = _find_circuit(req.circuit)
@@ -1010,6 +1036,7 @@ async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
 
 # ── Phase 6.3 — Optimizer Mode endpoints ──────────────────────────────────────
 
+# Simulate a user-specified strategy through GridRaceEnv with all 20 rivals and return results.
 @app.post("/api/optimizer/simulate", response_model=GridSimulateResponse)
 async def simulate_grid(req: GridSimulateRequest) -> GridSimulateResponse:
     circuit = _find_circuit(req.circuit)
@@ -1054,6 +1081,7 @@ async def simulate_grid(req: GridSimulateRequest) -> GridSimulateResponse:
     )
 
 
+# Run the PPO Grid agent and return the optimal strategy with rationale and rival predictions.
 @app.post("/api/optimizer/recommend", response_model=OptimizerRecommendResponse)
 async def recommend_optimizer(req: OptimizerRecommendRequest) -> OptimizerRecommendResponse:
     circuit   = _find_circuit(req.circuit)
@@ -1115,6 +1143,7 @@ async def recommend_optimizer(req: OptimizerRecommendRequest) -> OptimizerRecomm
     "/api/optimizer/historical-validation/{year}/{circuit_name}",
     response_model=HistoricalValidationResponse,
 )
+# Run a full GridRaceEnv simulation of a historical race and compare to actual results.
 async def historical_validation(
     year: int,
     circuit_name: str,

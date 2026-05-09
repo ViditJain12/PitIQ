@@ -48,6 +48,7 @@ WET_COMPOUNDS    = ["INTERMEDIATE", "WET"]
 GREEN_STATUS     = "1"  # FastF1 TrackStatus for green flag
 
 
+# Load the lap_features parquet and strip invalid compound values.
 def _load_features() -> pd.DataFrame:
     path = _FEATURES_DIR / "lap_features.parquet"
     if not path.exists():
@@ -58,6 +59,7 @@ def _load_features() -> pd.DataFrame:
     return df
 
 
+# Return lists of (qualified, excluded) drivers filtered by minimum lap count.
 def _qualified_drivers(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     counts = df["Driver"].value_counts()
     qualified = counts[counts >= MIN_DRIVER_LAPS].index.tolist()
@@ -272,6 +274,7 @@ def build_driver_styles() -> tuple[pd.DataFrame, list[str], list[str]]:
     return styles, excluded, wet_nulled
 
 
+# Persist driver style vectors to driver_styles.parquet.
 def save_driver_styles(styles: pd.DataFrame) -> None:
     _FEATURES_DIR.mkdir(parents=True, exist_ok=True)
     out = _FEATURES_DIR / "driver_styles.parquet"
@@ -279,6 +282,7 @@ def save_driver_styles(styles: pd.DataFrame) -> None:
     logger.info("Saved %d driver style vectors → %s", len(styles), out)
 
 
+# Build the CLI argument parser for the style build script.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compute per-driver style feature vectors.")
     p.add_argument(
@@ -289,6 +293,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Entry point: compute all driver style vectors and save them to disk.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

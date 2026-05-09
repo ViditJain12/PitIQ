@@ -15,6 +15,7 @@ _CACHE_DIR = _REPO_ROOT / "data" / "raw" / "fastf1_cache"
 _cache_enabled = False
 
 
+# Initialise the FastF1 disk cache exactly once per process.
 def _ensure_cache() -> None:
     global _cache_enabled
     if not _cache_enabled:

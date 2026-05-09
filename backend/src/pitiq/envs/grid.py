@@ -145,6 +145,7 @@ def _circuit_rival_baseline(circuit: str, year: int) -> tuple[float, float, int]
     """
     train = _load_training_laps()
 
+    # Compute (pace_s1, pace_s2, median_pit_lap) from a circuit/year subset.
     def _profile(sub: pd.DataFrame) -> tuple[float, float, int] | None:
         top10 = sub[sub["position"] <= 10]
         if len(top10) < 10:
@@ -237,6 +238,7 @@ class GridRaceEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "ansi"]}
 
+    # Initialise 25-dim observation space, action space, and zero-out all grid state.
     def __init__(self, render_mode: str | None = None) -> None:
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -861,5 +863,6 @@ class GridRaceEnv(gym.Env):
         print(output)
         return output
 
+    # No-op close (no external resources to release).
     def close(self) -> None:
         pass

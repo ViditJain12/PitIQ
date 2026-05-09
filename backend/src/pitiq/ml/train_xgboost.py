@@ -115,6 +115,7 @@ MIN_TRAIN_YEARS = 3
 
 # ── Data helpers ───────────────────────────────────────────────────────────────
 
+# Load a named split parquet (train/val/test), stripping invalid compounds and null targets.
 def _load_split(name: str) -> pd.DataFrame:
     path = _FEATURES_DIR / f"{name}.parquet"
     if not path.exists():
@@ -126,6 +127,7 @@ def _load_split(name: str) -> pd.DataFrame:
     return df
 
 
+# Load driver style features from driver_styles.parquet, keeping only STYLE_FEATURES columns.
 def _load_styles() -> pd.DataFrame:
     path = _FEATURES_DIR / "driver_styles.parquet"
     if not path.exists():
@@ -169,12 +171,14 @@ def _build_feature_matrix(
     return encoded
 
 
+# Return a dict mapping each circuit name to its number of distinct training years.
 def _circuit_train_years(train_df: pd.DataFrame) -> dict[str, int]:
     return train_df.groupby("EventName")["Year"].nunique().to_dict()
 
 
 # ── Circuit coverage sanity check ─────────────────────────────────────────────
 
+# Raise ValueError if val or test contain circuits not seen during training.
 def _check_circuit_coverage(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
@@ -241,16 +245,19 @@ def _train(include_style: bool) -> tuple[xgb.XGBRegressor, list[str], dict]:
     return model, feature_cols, metrics
 
 
+# Train the baseline XGBoost model without driver style features.
 def train_baseline() -> tuple[xgb.XGBRegressor, list[str], dict]:
     return _train(include_style=False)
 
 
+# Train the driver-style-aware XGBoost model with 11 style features joined by Driver.
 def train_styled() -> tuple[xgb.XGBRegressor, list[str], dict]:
     return _train(include_style=True)
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
+# Evaluate model on test set and return metrics dict including MAE by compound, circuit, and driver.
 def _evaluate(
     model: xgb.XGBRegressor,
     X_test: pd.DataFrame,
@@ -320,6 +327,7 @@ def _evaluate(
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
+# Print a formatted metrics summary table for a trained model.
 def print_metrics(metrics: dict, label: str = "") -> None:
     tag = f" ({label})" if label else ""
     print(f"\n{'─'*52}")
@@ -344,11 +352,13 @@ def print_metrics(metrics: dict, label: str = "") -> None:
 def print_comparison(baseline: dict, styled: dict) -> None:
     """Print side-by-side baseline vs styled comparison table."""
 
+    # Format the signed difference between styled and baseline metric values.
     def delta(b: float, s: float) -> str:
         d = s - b
         sign = "+" if d >= 0 else "−"
         return f"{sign}{abs(d):.4f}"
 
+    # Print one comparison row with baseline, styled, and delta values.
     def row(label: str, b: float, s: float) -> None:
         print(f"  {label:<34}  {b:>8.4f}s  {s:>8.4f}s  {delta(b, s):>8}")
 
@@ -374,6 +384,7 @@ def print_comparison(baseline: dict, styled: dict) -> None:
     print(f"{'═'*62}")
 
 
+# Print the top-N best and worst predicted drivers by MAE.
 def print_driver_breakdown(metrics: dict, n: int = 5) -> None:
     driver_mae = sorted(metrics["driver_mae"].items(), key=lambda x: x[1])
     driver_n   = metrics["driver_n"]
@@ -387,6 +398,7 @@ def print_driver_breakdown(metrics: dict, n: int = 5) -> None:
         print(f"  {driver:<5}  MAE={mae:.4f}s  (n={driver_n[driver]:.0f} laps)")
 
 
+# Save a horizontal bar chart of the top-N features by XGBoost gain importance.
 def save_feature_importance_plot(
     model: xgb.XGBRegressor,
     feature_cols: list[str],
@@ -440,6 +452,7 @@ def save_feature_importance_plot(
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
+# Save the trained model pickle and its metadata JSON to the models directory.
 def save_artifacts(
     model: xgb.XGBRegressor,
     feature_cols: list[str],
@@ -474,6 +487,7 @@ def save_artifacts(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+# Build the CLI argument parser for the XGBoost training script.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train XGBoost lap time models.")
     group = p.add_mutually_exclusive_group(required=True)
@@ -486,6 +500,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Entry point: parse CLI flags and run the selected training mode.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

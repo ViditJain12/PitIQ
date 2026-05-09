@@ -1,4 +1,4 @@
-"""Phase 2.1 — Core lap feature engineering.
+"""Core lap feature engineering.
 
 Reads data/processed/laps_all.parquet, computes per-lap ML features,
 joins circuit metadata and per-session weather summaries, writes
@@ -71,6 +71,7 @@ _CIRCUIT_META: dict[str, dict] = {
 }
 
 
+# Left-join circuit metadata (length, type, pit loss) onto the laps DataFrame by EventName.
 def _join_circuit_meta(df: pd.DataFrame) -> pd.DataFrame:
     meta_df = pd.DataFrame.from_dict(_CIRCUIT_META, orient="index").rename_axis("EventName").reset_index()
     meta_df = meta_df.rename(columns={"type": "circuit_type"})
@@ -138,6 +139,7 @@ def _load_weather_for_sessions(
 # Core feature computation
 # ---------------------------------------------------------------------------
 
+# Compute derived per-lap columns: tire_age, stint_number, fuel_load_estimate, laps_remaining, position.
 def _compute_lap_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -169,6 +171,7 @@ def _compute_lap_features(df: pd.DataFrame) -> pd.DataFrame:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+# Full pipeline: load laps, compute per-lap features, join circuit metadata and weather, write lap_features.parquet.
 def build_features(*, include_weather: bool = True) -> pd.DataFrame:
     _FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -216,6 +219,7 @@ def build_features(*, include_weather: bool = True) -> pd.DataFrame:
 # CLI
 # ---------------------------------------------------------------------------
 
+# Build the argument parser for the feature build CLI.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Build lap feature dataset.")
     p.add_argument(
@@ -231,6 +235,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# CLI entry point: parse args, run build_features, print null audit.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

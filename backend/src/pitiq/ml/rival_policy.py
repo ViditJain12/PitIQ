@@ -1,4 +1,4 @@
-"""Rival pit-decision classifier (Phase 4.5.1).
+"""Rival pit-decision classifier.
 
 Trains an XGBClassifier to predict whether a driver will pit on the following
 lap given current race state + driver style features.
@@ -84,6 +84,7 @@ class _CalibratedPitModel:
     equivalent without the API dependency.
     """
 
+    # Store the base XGBClassifier and its isotonic calibrator.
     def __init__(
         self,
         base_model: xgb.XGBClassifier,
@@ -92,6 +93,7 @@ class _CalibratedPitModel:
         self.base_model = base_model
         self.iso_reg    = iso_reg
 
+    # Return calibrated pit probabilities clipped to [0.001, 0.95] for stochastic sampling.
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         raw = self.base_model.predict_proba(X)[:, 1]
         cal = self.iso_reg.predict(raw)
@@ -396,6 +398,7 @@ def _run_sanity_checks(
 ) -> dict:
     """Run 4 directional sanity checks; return results dict."""
 
+    # Build a single-row feature matrix and return the calibrated pit probability.
     def _prob(
         driver: str,
         circuit: str,
@@ -637,6 +640,7 @@ def predict_pit_probability(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+# Build the CLI argument parser for the rival policy training script.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Train the rival pit-decision classifier (Phase 4.5.1)."
@@ -650,6 +654,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Entry point: train the rival pit classifier and print results.
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(

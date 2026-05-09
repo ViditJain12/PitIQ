@@ -1,4 +1,4 @@
-"""Inference wrapper around the styled XGBoost model (Phase 3.3).
+"""Inference wrapper around the styled XGBoost model.
 
 Exposes three public functions:
 
@@ -53,6 +53,7 @@ _FUEL_BURN_KG_PER_LAP = 1.8
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+# Estimate remaining fuel in kg at a given race lap using the standard burn model.
 def _fuel_load(race_lap: int) -> float:
     return max(0.0, _FUEL_START_KG - (race_lap - 1) * _FUEL_BURN_KG_PER_LAP)
 
@@ -416,6 +417,7 @@ def degradation_curve_to_json(
 
 # ── Validation / CLI ──────────────────────────────────────────────────────────
 
+# Run CLI validation: print degradation curves and save comparison plots.
 def _run_validation() -> None:
     circuit      = "Italian Grand Prix"
     total_laps   = 53

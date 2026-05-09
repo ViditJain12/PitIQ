@@ -80,6 +80,7 @@ def _training_data() -> pd.DataFrame:
     return df[~df["_key"].isin(held_out)].drop(columns=["_key"])
 
 
+# Compute (pace_s1, pace_s2, median_pit_lap) from top-10 finishers in a circuit/year subset.
 def _profile_from_subset(sub: pd.DataFrame) -> tuple[float, float, int] | None:
     """Compute (pace_s1, pace_s2, median_pit_lap) from a circuit/year slice."""
     top10 = sub[sub["position"] <= 10]
@@ -159,17 +160,21 @@ def rival_reference_time(circuit: str, year: int, total_laps: int) -> float:
 class RewardLogger:
     """Records per-step reward components for validation. Disabled by default."""
 
+    # Initialise the logger with optional enabled flag.
     def __init__(self, enabled: bool = False) -> None:
         self.enabled = enabled
         self.records: list[dict] = []
 
+    # Clear all recorded reward component entries.
     def reset(self) -> None:
         self.records.clear()
 
+    # Append one lap's reward component dict if logging is enabled.
     def log(self, lap: int, **components: float) -> None:
         if self.enabled:
             self.records.append({"lap": lap, **components})
 
+    # Return all recorded entries as a DataFrame.
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.records)
 
@@ -184,6 +189,7 @@ class SandboxRaceEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "ansi"]}
 
+    # Initialise observation and action spaces and zero-out all race state variables.
     def __init__(self, render_mode: str | None = None, log_rewards: bool = False) -> None:
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -260,6 +266,7 @@ class SandboxRaceEnv(gym.Env):
 
     # ── reset ──────────────────────────────────────────────────────────────────
 
+    # Reset the race to initial state from the options dict and return the first observation.
     def reset(
         self,
         *,
@@ -335,6 +342,7 @@ class SandboxRaceEnv(gym.Env):
 
     # ── step ───────────────────────────────────────────────────────────────────
 
+    # Execute one lap: validate action, predict lap time, update state, compute reward, return obs.
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self.action_space.contains(action), f"Invalid action: {action}"
         original_action = action          # capture before possible reassignment
@@ -497,6 +505,7 @@ class SandboxRaceEnv(gym.Env):
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
+    # Build and return the 13-dim float32 observation vector from current race state.
     def _obs(self) -> np.ndarray:
         compound_oh = np.zeros(5, dtype=np.float32)
         compound_oh[_COMPOUND_IDX.get(self._compound, 0)] = 1.0
@@ -538,6 +547,7 @@ class SandboxRaceEnv(gym.Env):
 
     # ── render ─────────────────────────────────────────────────────────────────
 
+    # Print or return a one-line race status string for the completed lap.
     def render(self) -> str | None:
         cum_m  = int(self._cum_time // 60)
         cum_s  = self._cum_time % 60
@@ -554,5 +564,6 @@ class SandboxRaceEnv(gym.Env):
             print(line)
         return line
 
+    # No-op close (no external resources to release).
     def close(self) -> None:
         pass

@@ -180,8 +180,14 @@ app.add_middleware(
 # Load parquet data, cluster drivers, warm model caches, and store state on app startup.
 @app.on_event("startup")
 async def startup() -> None:
+    import json as _json
     lap_features   = pd.read_parquet(_DATA_DIR / "lap_features.parquet")
     driver_styles  = pd.read_parquet(_DATA_DIR / "driver_styles.parquet")
+    circuit_maps_path = _DATA_DIR / "circuit_maps.json"
+    circuit_maps: dict[str, dict] = {}
+    if circuit_maps_path.exists():
+        with open(circuit_maps_path) as f:
+            circuit_maps = _json.load(f)
 
     # Per-circuit available years (computed once)
     circuit_years: dict[str, list[int]] = {
@@ -217,6 +223,7 @@ async def startup() -> None:
     app.state.driver_styles        = driver_styles
     app.state.circuit_years        = circuit_years
     app.state.cluster_map          = cluster_map
+    app.state.circuit_maps         = circuit_maps
     app.state.xgb_circuit_defaults = xgb_circuit_defaults
     app.state.ppo_sandbox          = ppo_sandbox
     app.state.ppo_grid             = ppo_grid
@@ -234,6 +241,7 @@ async def shutdown() -> None:
 # Build a CircuitInfo response object for the given circuit name.
 def _circuit_info(name: str) -> CircuitInfo:
     meta = _CIRCUIT_META[name]
+    cmap = app.state.circuit_maps.get(name, {})
     return CircuitInfo(
         name=name,
         length_km=meta["length_km"],
@@ -242,6 +250,8 @@ def _circuit_info(name: str) -> CircuitInfo:
         is_street_circuit=(meta["type"] == "street"),
         total_laps_typical=_TOTAL_LAPS_TYPICAL.get(name, 57),
         available_years=app.state.circuit_years.get(name, []),
+        svg_points=cmap.get("svg_points"),
+        viewBox=cmap.get("viewBox"),
     )
 
 

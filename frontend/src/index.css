@@ -19,6 +19,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+button {
+  border-radius: var(--radius-btn);
+}
+
 @keyframes scanline {
   0%   { top: -1px; }
   100% { top: 100vh; }
@@ -27,4 +31,13 @@ body {
 @keyframes scan-bar {
   0%   { left: -40%; }
   100% { left: 140%; }
+}
+
+@keyframes draw-circuit {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes style-pulse {
+  0%, 100% { border-color: rgba(232,0,45,0.5); box-shadow: none; }
+  50%       { border-color: rgba(232,0,45,0.9); box-shadow: 0 0 8px rgba(232,0,45,0.35); }
 }

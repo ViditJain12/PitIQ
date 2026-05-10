@@ -17,6 +17,7 @@ import type { LapData, RivalPrediction, UndercutWindow } from '../api/types'
 import TireBadge from '../components/TireBadge'
 import StatCard from '../components/StatCard'
 import DriverStylePanel from '../components/DriverStylePanel'
+import { CircuitMap } from '../components/CircuitMap'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
@@ -916,18 +917,39 @@ export default function Optimizer() {
               </div>
             </div>
             {circuitInfo && (
-              <div style={{ background: 'var(--color-surface-2)', padding: '10px 12px', display: 'flex', gap: 20 }}>
-                {[
-                  { label: 'Length', value: `${circuitInfo.length_km} km` },
-                  { label: 'Laps', value: circuitInfo.total_laps_typical },
-                  { label: 'Type', value: circuitInfo.circuit_type },
-                ].map(m => (
-                  <div key={m.label}>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{m.label}</div>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text)', fontWeight: 600 }}>{m.value}</div>
+              <>
+                <div style={{ background: 'var(--color-surface-2)', padding: '10px 12px', display: 'flex', gap: 20 }}>
+                  {[
+                    { label: 'Length', value: `${circuitInfo.length_km} km` },
+                    { label: 'Laps', value: circuitInfo.total_laps_typical },
+                    { label: 'Type', value: circuitInfo.circuit_type },
+                  ].map(m => (
+                    <div key={m.label}>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{m.label}</div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text)', fontWeight: 600 }}>{m.value}</div>
+                    </div>
+                  ))}
+                </div>
+                {circuitInfo.svg_points && (
+                  <div style={{ background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4, padding: '10px 12px' }}>
+                    <CircuitMap
+                      svgPoints={circuitInfo.svg_points}
+                      viewBox={circuitInfo.viewBox ?? '0 0 200 120'}
+                      width="100%"
+                      height={100}
+                      color="#27F4D2"
+                      animated
+                      circuitInfo={{
+                        name: circuitInfo.name,
+                        length_km: circuitInfo.length_km,
+                        circuit_type: circuitInfo.circuit_type,
+                        pit_loss_s: circuitInfo.pit_loss_s,
+                        total_laps_typical: circuitInfo.total_laps_typical,
+                      }}
+                    />
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </div>
 

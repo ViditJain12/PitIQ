@@ -36,5 +36,7 @@
 
   /* Geometry */
   --radius:             0px;
+  --radius-card:        8px;
+  --radius-btn:         6px;
   --border:             1px solid var(--color-border);
 }

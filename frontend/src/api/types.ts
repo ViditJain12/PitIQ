@@ -10,6 +10,8 @@ export interface CircuitInfo {
   is_street_circuit: boolean
   total_laps_typical: number
   available_years: number[]
+  svg_points?: string | null
+  viewBox?: string | null
 }
 
 export interface DriverInfo {

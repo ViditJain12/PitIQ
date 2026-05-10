@@ -11,15 +11,7 @@ import type { DriverInfo } from '../api/types'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
-const CLUSTER_LABELS: Record<number, string> = {
-  0: 'Midfield veterans',
-  1: 'Back-of-grid',
-  2: 'Veteran outliers',
-  3: 'Newer/backmarkers',
-  4: 'Top-tier all-rounders',
-}
-
-const RADAR_AXES = ['Pace', 'Tire Saving', 'Wet Skill', 'Smoothness', 'Aggression', 'Consistency'] as const
+const RADAR_AXES = ['Pace', 'Tire Saving', 'Wet Skill', 'Smoothness', 'Aggression'] as const
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -35,10 +27,10 @@ function norm(value: number | null, allVals: (number | null)[], invert = false):
   if (value === null) return 0
   const valid = allVals.filter((v): v is number => v !== null)
   if (valid.length < 2) return 0.5
-  const min = Math.min(...valid)
-  const max = Math.max(...valid)
-  if (max === min) return 0.5
-  const n = (value - min) / (max - min)
+  const mn = Math.min(...valid)
+  const mx = Math.max(...valid)
+  if (mx === mn) return 0.5
+  const n = (value - mn) / (mx - mn)
   return invert ? 1 - n : n
 }
 
@@ -49,7 +41,6 @@ function radarNorms(d: DriverInfo, normDrivers: DriverInfo[]): Record<typeof RAD
     'Wet Skill':   norm(sv(d, 'wet_skill_delta'),      allSV(normDrivers, 'wet_skill_delta'), true),
     'Smoothness':  norm(sv(d, 'throttle_smoothness'),  allSV(normDrivers, 'throttle_smoothness')),
     'Aggression':  norm(sv(d, 'cornering_aggression'), allSV(normDrivers, 'cornering_aggression')),
-    'Consistency': 0.5,
   }
 }
 
@@ -70,137 +61,69 @@ function generateInsight(d1: DriverInfo, d2: DriverInfo): string {
   const tireDiff = t1 - t2
   if (Math.abs(paceDiff) > 5) {
     const faster = paceDiff > 0 ? d1.code : d2.code
-    return `${faster} is significantly faster overall (${Math.abs(paceDiff).toFixed(1)} rank positions).`
+    return `${faster} is significantly faster overall (${Math.abs(paceDiff).toFixed(1)} rank positions). Strategy decisions should favour their pace window.`
   }
   if (Math.abs(tireDiff) > 0.003) {
     const saver = tireDiff > 0 ? d1.code : d2.code
-    return `${saver} is the better tire manager — extended stints will favour them.`
+    return `${saver} is the better tire manager — extended stints will work in their favour, allowing a later pit window.`
   }
-  return `${d1.code} and ${d2.code} have similar style profiles.`
+  return `${d1.code} and ${d2.code} show similar style profiles. Strategy differences will come from circuit fit and starting position, not driver DNA.`
 }
 
-// ── MetricBar ──────────────────────────────────────────────────────────────
+function fmt(v: number | null, dec = 3, sign = false): string {
+  if (v === null) return 'N/A'
+  const s = v.toFixed(dec)
+  return sign && v > 0 ? `+${s}` : s
+}
 
-function MetricBar({
-  label, value, normalized, accent, decimals = 3, note, showSign = false,
-}: {
-  label: string
-  value: number | null
-  normalized: number
-  accent: boolean
-  decimals?: number
-  note?: string
-  showSign?: boolean
-}) {
-  const filled = Math.round(Math.min(1, Math.max(0, normalized)) * 10)
-  const barColor = accent ? 'var(--color-accent)' : 'rgba(255,255,255,0.35)'
-  const display = value === null
-    ? 'N/A'
-    : (showSign && value > 0 ? '+' : '') + value.toFixed(decimals)
+// ── SectionLabel ───────────────────────────────────────────────────────────
+
+function SectionLabel({ label }: { label: string }) {
   return (
-    <div style={{ marginBottom: 9 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 3 }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-          {label}
-        </span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)', fontWeight: 600 }}>
-          {display}
-        </span>
-      </div>
-      <div style={{ display: 'flex', gap: 1 }}>
-        {Array.from({ length: 10 }).map((_, i) => (
-          <div key={i} style={{ flex: 1, height: 3, background: i < filled ? barColor : 'var(--color-surface-2)' }} />
-        ))}
-      </div>
-      {note && (
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', fontStyle: 'italic', marginTop: 2 }}>
-          {note}
-        </div>
-      )}
+    <div style={{
+      fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.18em',
+      color: 'var(--color-text-muted)', textTransform: 'uppercase',
+      borderBottom: '1px solid var(--color-border)', paddingBottom: 6, marginBottom: 10, marginTop: 18,
+    }}>
+      {label}
     </div>
   )
 }
 
-// ── DriverColumn ───────────────────────────────────────────────────────────
+// ── ComparisonTable ────────────────────────────────────────────────────────
 
-function DriverColumn({ driver, isEgo, normDrivers }: {
-  driver: DriverInfo
-  isEgo: boolean
-  normDrivers: DriverInfo[]
+import type { ReactNode } from 'react'
+
+function ComparisonTable({ rows, col1, col2 }: {
+  rows: Array<{ label: ReactNode; v1: string; v2: string; v1Color?: string; v2Color?: string }>
+  col1: string
+  col2: string
 }) {
-  const accent = isEgo ? 'var(--color-accent)' : 'var(--color-text-muted)'
-  const paceVals  = allSV(normDrivers, 'overall_pace_rank')
-  const tireVals  = allSV(normDrivers, 'tire_saving_coef')
-  const wetVals   = allSV(normDrivers, 'wet_skill_delta')
-  const smoothVals = allSV(normDrivers, 'throttle_smoothness')
-  const aggrVals  = allSV(normDrivers, 'cornering_aggression')
-
-  function Section({ label }: { label: string }) {
-    return (
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: accent, letterSpacing: '0.12em', textTransform: 'uppercase', borderBottom: '1px solid var(--color-border)', paddingBottom: 4, marginBottom: 8, marginTop: 14 }}>
-        {label}
-      </div>
-    )
-  }
-
   return (
-    <div style={{ flex: 1, minWidth: 0 }}>
-      {/* Driver header */}
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 16, fontWeight: 700, letterSpacing: '0.05em', color: isEgo ? 'var(--color-accent)' : 'var(--color-text)', marginBottom: 2 }}>
-          {driver.code}
-        </div>
-        <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 4 }}>
-          {driver.full_name}
-        </div>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-          {driver.team_2024}
-        </div>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: '0.08em', color: isEgo ? 'var(--color-accent)' : 'var(--color-text-muted)', border: `1px solid ${isEgo ? 'var(--color-accent)' : 'var(--color-border)'}`, padding: '1px 6px' }}>
-          {CLUSTER_LABELS[driver.cluster] ?? `Cluster ${driver.cluster}`}
-        </span>
-      </div>
-
-      {/* Style Metrics */}
-      <Section label="Style Metrics" />
-      <MetricBar label="Pace Rank" value={sv(driver, 'overall_pace_rank')} normalized={norm(sv(driver, 'overall_pace_rank'), paceVals, true)} accent={isEgo} decimals={1} note="lower = faster" />
-      <MetricBar label="Tire Saving" value={sv(driver, 'tire_saving_coef')} normalized={norm(sv(driver, 'tire_saving_coef'), tireVals)} accent={isEgo} decimals={4} />
-      <MetricBar label="Wet Skill Δ" value={sv(driver, 'wet_skill_delta')} normalized={norm(sv(driver, 'wet_skill_delta'), wetVals, true)} accent={isEgo} decimals={2} note="negative = faster in wet" showSign />
-      <MetricBar label="Cornering Aggr." value={sv(driver, 'cornering_aggression')} normalized={norm(sv(driver, 'cornering_aggression'), aggrVals)} accent={isEgo} />
-      <MetricBar label="Throttle Smooth." value={sv(driver, 'throttle_smoothness')} normalized={norm(sv(driver, 'throttle_smoothness'), smoothVals)} accent={isEgo} />
-
-      {/* Sector Profile */}
-      <Section label="Sector Profile" />
-      {(['s1', 's2', 's3'] as const).map(s => {
-        const val = sv(driver, `sector_relative_${s}`)
-        return (
-          <div key={s} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5 }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
-              S{s.slice(1)} Relative
-            </span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, color: val === null ? 'var(--color-text-muted)' : val < 0 ? '#39B54A' : 'var(--color-text)' }}>
-              {val === null ? 'N/A' : `${val >= 0 ? '+' : ''}${val.toFixed(2)}s`}
-            </span>
-          </div>
-        )
-      })}
-
-      {/* Pace Trends */}
-      <Section label="Pace Trends (s/lap)" />
-      <div style={{ display: 'flex', gap: 10 }}>
-        {(['soft', 'medium', 'hard'] as const).map(c => {
-          const val = sv(driver, `pace_trend_${c}`)
-          return (
-            <div key={c} style={{ flex: 1 }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: 3 }}>{c}</div>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text)', fontWeight: 600 }}>
-                {val === null ? 'N/A' : val.toFixed(3)}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr>
+          <td style={{ paddingBottom: 6, width: '52%' }} />
+          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-accent)', letterSpacing: '0.12em', paddingBottom: 6, paddingRight: 12, textAlign: 'right', width: '24%' }}>{col1}</td>
+          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-dim)', letterSpacing: '0.12em', paddingBottom: 6, textAlign: 'right', width: '24%' }}>{col2}</td>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i} style={{ borderTop: '1px solid var(--color-border)' }}>
+            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.06em', padding: '6px 0', textTransform: 'uppercase' }}>
+              {r.label}
+            </td>
+            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, color: r.v1Color ?? 'var(--color-text)', textAlign: 'right', paddingRight: 12 }}>
+              {r.v1}
+            </td>
+            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, color: r.v2Color ?? 'var(--color-text-dim)', textAlign: 'right' }}>
+              {r.v2}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 
@@ -209,8 +132,8 @@ function DriverColumn({ driver, isEgo, normDrivers }: {
 interface Props {
   isOpen: boolean
   egoDriver: DriverInfo | null
-  allDrivers: DriverInfo[]          // season-filtered list — used for dropdown
-  normDrivers: DriverInfo[]         // full 33-driver roster — used for min/max normalisation
+  allDrivers: DriverInfo[]
+  normDrivers: DriverInfo[]
   onClose: () => void
 }
 
@@ -218,7 +141,6 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
   const [compCode, setCompCode] = useState<string>('')
   const panelRef = useRef<HTMLDivElement>(null)
 
-  // Default comparison driver when ego changes
   useEffect(() => {
     if (!egoDriver || allDrivers.length === 0) return
     setCompCode(prev => {
@@ -227,7 +149,6 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
     })
   }, [egoDriver?.code, allDrivers.length]) // eslint-disable-line
 
-  // Escape to close
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -235,22 +156,18 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
     return () => window.removeEventListener('keydown', handler)
   }, [isOpen, onClose])
 
-  // Click-outside to close (using mousedown so click still fires on elements behind)
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose()
-      }
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose()
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [isOpen, onClose])
 
   const compDriver = allDrivers.find(d => d.code === compCode) ?? null
-
-  // Build radar data — normalise against full 33-driver roster
   const base = normDrivers.length > 0 ? normDrivers : allDrivers
+
   const radarData = egoDriver
     ? RADAR_AXES.map(axis => {
         const egoR = radarNorms(egoDriver, base)
@@ -259,45 +176,104 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
       })
     : []
 
+  const metricsRows = egoDriver && compDriver
+    ? [
+        {
+          label: 'Pace Rank',
+          v1: fmt(sv(egoDriver, 'overall_pace_rank'), 1),
+          v2: fmt(sv(compDriver, 'overall_pace_rank'), 1),
+          v1Color: (sv(egoDriver, 'overall_pace_rank') ?? 99) <= (sv(compDriver, 'overall_pace_rank') ?? 99) ? '#39B54A' : 'var(--color-text)',
+        },
+        {
+          label: 'Tire Saving',
+          v1: fmt(sv(egoDriver, 'tire_saving_coef'), 4),
+          v2: fmt(sv(compDriver, 'tire_saving_coef'), 4),
+        },
+        {
+          label: 'Wet Skill Δ',
+          v1: fmt(sv(egoDriver, 'wet_skill_delta'), 2, true),
+          v2: fmt(sv(compDriver, 'wet_skill_delta'), 2, true),
+          v1Color: (sv(egoDriver, 'wet_skill_delta') ?? 0) < (sv(compDriver, 'wet_skill_delta') ?? 0) ? '#39B54A' : 'var(--color-text)',
+        },
+        {
+          label: 'Cornering Aggr.',
+          v1: fmt(sv(egoDriver, 'cornering_aggression'), 3),
+          v2: fmt(sv(compDriver, 'cornering_aggression'), 3),
+        },
+        {
+          label: 'Throttle Smooth.',
+          v1: fmt(sv(egoDriver, 'throttle_smoothness'), 3),
+          v2: fmt(sv(compDriver, 'throttle_smoothness'), 3),
+          v1Color: (sv(egoDriver, 'throttle_smoothness') ?? 0) >= (sv(compDriver, 'throttle_smoothness') ?? 0) ? '#39B54A' : 'var(--color-text)',
+        },
+      ]
+    : []
+
+  const COMPOUND_DOT: Record<string, string> = { soft: '#E8002D', medium: '#FFF200', hard: '#FFFFFF' }
+  const COMPOUND_ABBR: Record<string, string> = { soft: 'SOFT', medium: 'MED', hard: 'HARD' }
+
+  const sectorRows = egoDriver && compDriver
+    ? (['s1', 's2', 's3'] as const).map(s => {
+        const v1 = sv(egoDriver, `sector_relative_${s}`)
+        const v2 = sv(compDriver, `sector_relative_${s}`)
+        return {
+          label: `S${s.slice(1)}`,
+          v1: fmt(v1, 3, true),
+          v2: fmt(v2, 3, true),
+          v1Color: v1 === null ? undefined : v1 < 0 ? '#39B54A' : 'var(--color-text)',
+          v2Color: v2 === null ? undefined : v2 < 0 ? '#39B54A' : 'var(--color-text-dim)',
+        }
+      })
+    : []
+
+  const trendRows = egoDriver && compDriver
+    ? (['soft', 'medium', 'hard'] as const).map(c => ({
+        label: (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: 1, background: COMPOUND_DOT[c], flexShrink: 0, display: 'inline-block' }} />
+            {COMPOUND_ABBR[c]}
+          </span>
+        ),
+        v1: fmt(sv(egoDriver, `pace_trend_${c}`), 3, true),
+        v2: fmt(sv(compDriver, `pace_trend_${c}`), 3, true),
+      }))
+    : []
+
   return (
     <div
       ref={panelRef}
       style={{
         position: 'fixed', top: 0, right: 0,
-        width: 'min(600px, 100vw)', height: '100vh',
+        width: 'min(520px, 100vw)', height: '100vh',
         background: 'var(--color-surface)', borderLeft: 'var(--border)',
         zIndex: 200, overflowY: 'auto',
         transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
         transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-        display: 'flex', flexDirection: 'column',
         boxShadow: '-8px 0 40px rgba(0,0,0,0.5)',
       }}
     >
-      {/* Panel header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: 'var(--border)', flexShrink: 0, background: 'var(--color-surface)' }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.2em', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: 'var(--border)', background: 'var(--color-surface)', position: 'sticky', top: 0, zIndex: 1 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.2em', color: 'var(--color-text)', textTransform: 'uppercase', fontWeight: 700 }}>
           Driver Style Inspector
         </span>
-        <button
-          onClick={onClose}
-          style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: 20, lineHeight: 1, padding: '0 4px' }}
-        >
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: 20, lineHeight: 1, padding: '0 4px' }}>
           ×
         </button>
       </div>
 
       {egoDriver ? (
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column' }}>
 
-          {/* Comparison driver selector */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase', flexShrink: 0 }}>
-              Compare with
-            </span>
+          {/* Compare with dropdown */}
+          <div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>
+              Compare With
+            </div>
             <select
               value={compCode}
               onChange={e => setCompCode(e.target.value)}
-              style={{ flex: 1, padding: '6px 8px', background: 'var(--color-surface-2)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 11, outline: 'none', appearance: 'none' }}
+              style={{ width: '100%', padding: '7px 10px', background: 'var(--color-surface-2)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 11, outline: 'none', appearance: 'none', cursor: 'pointer' }}
             >
               {allDrivers.filter(d => d.code !== egoDriver.code).map(d => (
                 <option key={d.code} value={d.code}>{d.code} — {d.full_name}</option>
@@ -305,72 +281,83 @@ export default function DriverStylePanel({ isOpen, egoDriver, allDrivers, normDr
             </select>
           </div>
 
+          {/* Style Comparison label */}
+          <SectionLabel label="Style Comparison" />
+
           {/* Radar chart */}
-          <div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
-              Style Comparison
-            </div>
-            <ResponsiveContainer width="100%" height={300}>
-              <RadarChart data={radarData} outerRadius={100} margin={{ top: 16, right: 48, bottom: 16, left: 48 }}>
-                <PolarGrid stroke="var(--color-border)" />
-                <PolarAngleAxis
-                  dataKey="axis"
-                  tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
-                />
-                <PolarRadiusAxis domain={[0, 1]} tick={false} axisLine={false} />
-                {compDriver && (
-                  <Radar
-                    name={compDriver.code}
-                    dataKey="comp"
-                    stroke="rgba(255,255,255,0.3)"
-                    fill="rgba(255,255,255,0.12)"
-                    fillOpacity={1}
-                    strokeWidth={1}
-                  />
-                )}
-                <Radar
-                  name={egoDriver.code}
-                  dataKey="ego"
-                  stroke="var(--color-accent)"
-                  fill="var(--color-accent)"
-                  fillOpacity={0.28}
-                  strokeWidth={1.5}
-                />
-              </RadarChart>
-            </ResponsiveContainer>
-            <div style={{ display: 'flex', gap: 20, justifyContent: 'center', marginTop: 4 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <div style={{ width: 12, height: 12, background: 'var(--color-accent)', opacity: 0.7 }} />
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{egoDriver.code}</span>
-              </div>
+          <ResponsiveContainer width="100%" height={260}>
+            <RadarChart data={radarData} outerRadius={90} margin={{ top: 12, right: 44, bottom: 12, left: 44 }}>
+              <PolarGrid stroke="var(--color-border)" />
+              <PolarAngleAxis
+                dataKey="axis"
+                tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+              />
+              <PolarRadiusAxis domain={[0, 1]} tick={false} axisLine={false} />
               {compDriver && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 12, height: 12, background: 'rgba(255,255,255,0.25)' }} />
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{compDriver.code}</span>
-                </div>
+                <Radar name={compDriver.code} dataKey="comp" stroke="rgba(255,255,255,0.25)" fill="rgba(255,255,255,0.08)" fillOpacity={1} strokeWidth={1} />
               )}
+              <Radar name={egoDriver.code} dataKey="ego" stroke="var(--color-accent)" fill="var(--color-accent)" fillOpacity={0.25} strokeWidth={1.5} />
+            </RadarChart>
+          </ResponsiveContainer>
+
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 20, justifyContent: 'center', marginTop: 2, marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ width: 10, height: 10, background: 'var(--color-accent)', opacity: 0.7 }} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{egoDriver.code}</span>
             </div>
+            {compDriver && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 10, height: 10, background: 'rgba(255,255,255,0.2)' }} />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{compDriver.code}</span>
+              </div>
+            )}
           </div>
 
-          {/* Key insight */}
+          {/* Insight */}
           {compDriver && (
             <div style={{ padding: '10px 14px', background: 'rgba(232,0,45,0.05)', border: '1px solid rgba(232,0,45,0.15)' }}>
-              <span style={{ fontFamily: 'var(--font-body)', fontSize: 12, fontStyle: 'italic', color: 'var(--color-text-dim)', lineHeight: 1.6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                <span style={{ fontSize: 11 }}>⚡</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-accent)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  {Math.abs((sv(egoDriver, 'overall_pace_rank') ?? 0) - (sv(compDriver, 'overall_pace_rank') ?? 0)) < 5
+                    ? 'Similar style profile'
+                    : 'Style divergence detected'}
+                </span>
+              </div>
+              <p style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontStyle: 'italic', color: 'var(--color-text-dim)', lineHeight: 1.6, margin: 0 }}>
                 {generateInsight(egoDriver, compDriver)}
-              </span>
+              </p>
             </div>
           )}
 
-          {/* Two-column driver details */}
-          <div style={{ display: 'flex', gap: 20 }}>
-            <DriverColumn driver={egoDriver} isEgo={true} normDrivers={base} />
-            {compDriver && (
-              <DriverColumn driver={compDriver} isEgo={false} normDrivers={base} />
-            )}
-          </div>
+          {/* Style Metrics Comparison */}
+          {metricsRows.length > 0 && (
+            <>
+              <SectionLabel label="Style Metrics Comparison" />
+              <ComparisonTable rows={metricsRows} col1={egoDriver.code} col2={compDriver!.code} />
+            </>
+          )}
+
+          {/* Sector Profile */}
+          {sectorRows.length > 0 && (
+            <>
+              <SectionLabel label="Sector Profile (s/l)" />
+              <ComparisonTable rows={sectorRows} col1={egoDriver.code} col2={compDriver!.code} />
+            </>
+          )}
+
+          {/* Pace Trends */}
+          {trendRows.length > 0 && (
+            <>
+              <SectionLabel label="Pace Trends (s/lap)" />
+              <ComparisonTable rows={trendRows} col1={egoDriver.code} col2={compDriver!.code} />
+            </>
+          )}
+
         </div>
       ) : (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
           Select a driver to inspect
         </div>
       )}

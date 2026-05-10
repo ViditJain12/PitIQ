@@ -11,6 +11,8 @@ class CircuitInfo(BaseModel):
     is_street_circuit: bool
     total_laps_typical: int
     available_years: list[int]
+    svg_points: str | None = None
+    viewBox: str | None = None
 
 
 class DriverInfo(BaseModel):

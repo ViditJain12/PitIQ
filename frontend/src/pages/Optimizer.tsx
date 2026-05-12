@@ -2,22 +2,27 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ComposedChart,
+  BarChart,
+  Bar,
+  Cell,
   LineChart,
   Line,
   XAxis,
   YAxis,
+  CartesianGrid,
   Tooltip,
   ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
 } from 'recharts'
+import { MapPin, Flag, Sparkles, Target, TrendingUp } from 'lucide-react'
 import { api } from '../api/client'
 import { useStore } from '../store'
 import type { LapData, RivalPrediction, UndercutWindow } from '../api/types'
 import TireBadge from '../components/TireBadge'
-import StatCard from '../components/StatCard'
 import DriverStylePanel from '../components/DriverStylePanel'
 import { CircuitMap } from '../components/CircuitMap'
+import RaceReplay from '../components/RaceReplay'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
@@ -59,6 +64,10 @@ function formatRaceTime(s: number): string {
   const m = Math.floor((s % 3600) / 60)
   const sec = Math.floor(s % 60)
   return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+}
+
+function avg(nums: number[]): number {
+  return nums.reduce((a, b) => a + b, 0) / nums.length
 }
 
 function lerp(a: number, b: number, t: number): number {
@@ -143,17 +152,33 @@ interface FormState {
   startingCompound: string
 }
 
+// ── chart constants ────────────────────────────────────────────────────────
+
+const AXIS_STYLE = { fill: 'var(--color-text-dim)', fontSize: 10, fontFamily: 'var(--font-mono)' }
+const GRID_STYLE = { stroke: 'var(--color-border)', strokeOpacity: 0.3 }
+const TOOLTIP_STYLE = { background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)' }
+
 // ── sub-components ─────────────────────────────────────────────────────────
 
-function SectionLabel({ n, label }: { n: number; label: string }) {
+function SectionCard({ number, title, children }: { number: string; title: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--color-accent)', background: 'rgba(232,0,45,0.12)', border: '1px solid var(--color-accent)', padding: '1px 6px', letterSpacing: '0.05em' }}>
-        {n}
-      </span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
-        {label}
-      </span>
+    <div
+      style={{
+        background: 'var(--color-surface)',
+        borderLeft: '3px solid var(--color-accent)',
+        borderRadius: 'var(--radius-card)',
+        padding: '18px 20px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--color-accent)', letterSpacing: '0.05em' }}>
+          {number}
+        </span>
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 900, color: 'var(--color-text)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+          {title}
+        </span>
+      </div>
+      {children}
     </div>
   )
 }
@@ -168,7 +193,7 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 
 function CompoundButtons({ value, onChange }: { value: string; onChange: (c: string) => void }) {
   return (
-    <div style={{ display: 'flex', gap: 1 }}>
+    <div style={{ display: 'flex', gap: 3 }}>
       {COMPOUNDS.map(c => {
         const active = value === c
         return (
@@ -176,12 +201,14 @@ function CompoundButtons({ value, onChange }: { value: string; onChange: (c: str
             key={c}
             onClick={() => onChange(c)}
             style={{
-              padding: '5px 12px', fontFamily: 'var(--font-mono)', fontSize: 10,
-              fontWeight: 700, letterSpacing: '0.1em', cursor: 'pointer', border: 'none',
-              background: active ? COMPOUND_COLORS[c] : 'var(--color-surface-2)',
+              padding: '4px 8px',
+              fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 700,
+              letterSpacing: '0.08em', cursor: 'pointer',
+              border: active ? 'none' : `1px solid ${COMPOUND_COLORS[c]}55`,
+              background: active ? COMPOUND_COLORS[c] : 'transparent',
               color: active ? (c === 'SOFT' ? '#fff' : '#000') : COMPOUND_COLORS[c],
-              outline: active ? 'none' : `1px solid ${COMPOUND_COLORS[c]}44`,
-              transition: 'background 0.1s',
+              borderRadius: 'var(--radius-btn)',
+              transition: 'all 0.1s',
             }}
           >
             {c}
@@ -204,8 +231,9 @@ function StyledSelect({
         width: '100%', padding: '8px 10px',
         background: 'var(--color-surface-2)', border: 'var(--border)',
         color: value ? 'var(--color-text)' : 'var(--color-text-muted)',
-        fontFamily: 'var(--font-mono)', fontSize: 12,
-        cursor: disabled ? 'not-allowed' : 'pointer', outline: 'none', appearance: 'none',
+        fontFamily: 'var(--font-mono)', fontSize: 11,
+        cursor: disabled ? 'not-allowed' : 'pointer', outline: 'none',
+        appearance: 'none', borderRadius: 4,
       }}
     >
       {placeholder && <option value="" disabled>{placeholder}</option>}
@@ -216,7 +244,7 @@ function StyledSelect({
 
 function StintBar({ stints, totalLaps }: { stints: Stint[]; totalLaps: number }) {
   return (
-    <div style={{ display: 'flex', height: 20, gap: 1, width: '100%' }}>
+    <div style={{ display: 'flex', height: 20, gap: 2, width: '100%', borderRadius: 4, overflow: 'hidden' }}>
       {stints.map((s, i) => (
         <div
           key={i}
@@ -244,10 +272,10 @@ function GridPositionTracker({
 
   return (
     <div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 8 }}>
         Grid Position Tracker
       </div>
-      <ResponsiveContainer width="100%" height={320}>
+      <ResponsiveContainer width="100%" height={260}>
         <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
           <XAxis
             dataKey="lap"
@@ -321,7 +349,7 @@ function GridPositionTracker({
           />
         </LineChart>
       </ResponsiveContainer>
-      <div style={{ display: 'flex', gap: 20, marginTop: 8 }}>
+      <div style={{ display: 'flex', gap: 20, marginTop: 6 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div style={{ width: 20, height: 2.5, background: 'var(--color-accent)' }} />
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>{egoDriver}</span>
@@ -337,51 +365,120 @@ function GridPositionTracker({
 
 // ── RivalPanel ─────────────────────────────────────────────────────────────
 
+// Reconstruct compound stints from pit history. All rivals start on SOFT.
+function buildRivalStints(pitHistory: Array<{ lap: number; compound: string }>): string[] {
+  const compounds = ['SOFT', ...pitHistory.map(p => p.compound)]
+  return compounds
+}
+
 function RivalPanel({ rivals, egoDriver }: { rivals: RivalPrediction[]; egoDriver: string }) {
   const sorted = [...rivals].sort((a, b) => a.final_position - b.final_position)
+
   return (
     <div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 4 }}>
-        Rival Predictions
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          Rival Predictions
+        </span>
+        <span style={{ fontFamily: 'var(--font-body)', fontSize: 10, fontStyle: 'italic', color: 'var(--color-text-muted)' }}>
+          ±2–3 position accuracy
+        </span>
       </div>
-      <div style={{ fontFamily: 'var(--font-body)', fontSize: 10, fontStyle: 'italic', color: 'var(--color-text-muted)', marginBottom: 8 }}>
-        Simulated estimates based on behavior-cloned pit policies (±2–3 position accuracy)
+
+      {/* Table header */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '36px 44px 1fr 1fr',
+        gap: '0 12px',
+        padding: '6px 12px',
+        borderBottom: '1px solid var(--color-border)',
+        marginBottom: 2,
+      }}>
+        {['POS', 'DRIVER', 'COMPOUND SEQ', 'PIT STOPS'].map(h => (
+          <span key={h} style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.14em', textTransform: 'uppercase' }}>
+            {h}
+          </span>
+        ))}
       </div>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
         {sorted.map(r => {
           const isEgo = r.driver === egoDriver
-          const delta = r.starting_position - Math.round(r.final_position)
+          const stintCompounds = buildRivalStints(r.pit_history)
+          const pitLaps = r.pit_history.map(p => `L${p.lap}`)
+
           return (
             <div
               key={r.driver}
               style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '8px 12px',
+                display: 'grid',
+                gridTemplateColumns: '36px 44px 1fr 1fr',
+                gap: '0 12px',
+                alignItems: 'center',
+                padding: '7px 12px',
                 background: isEgo ? 'rgba(232,0,45,0.08)' : 'var(--color-surface-2)',
-                border: isEgo ? '1px solid rgba(232,0,45,0.3)' : '1px solid transparent',
+                border: isEgo ? '1px solid rgba(232,0,45,0.25)' : '1px solid transparent',
               }}
             >
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', width: 28, flexShrink: 0 }}>
+              {/* POS */}
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700,
+                color: isEgo ? 'var(--color-accent)' : 'var(--color-text-dim)',
+              }}>
                 P{Math.round(r.final_position)}
               </span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, color: isEgo ? 'var(--color-accent)' : 'var(--color-text)', width: 36, flexShrink: 0 }}>
+
+              {/* Driver */}
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700,
+                color: isEgo ? 'var(--color-accent)' : 'var(--color-text)',
+                letterSpacing: '0.04em',
+              }}>
                 {r.driver}
               </span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', width: 32, flexShrink: 0 }}>
-                P{r.starting_position}→
-              </span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, width: 28, flexShrink: 0, color: delta > 0 ? '#39B54A' : delta < 0 ? 'var(--color-accent)' : 'var(--color-text-muted)' }}>
-                {delta > 0 ? `+${delta}` : String(delta)}
-              </span>
-              <div style={{ display: 'flex', gap: 4, flex: 1, flexWrap: 'wrap' }}>
-                {r.pit_history.map((p, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 3, background: 'var(--color-surface)', padding: '2px 6px' }}>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)' }}>L{p.lap}</span>
-                    <TireBadge compound={p.compound} size="sm" showLabel={false} />
+
+              {/* Compound sequence — colored circles, one per stint */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {stintCompounds.map((cmp, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {i > 0 && (
+                      <div style={{ width: 10, height: 1, background: 'var(--color-border)' }} />
+                    )}
+                    <div
+                      title={cmp}
+                      style={{
+                        width: 10, height: 10, borderRadius: '50%',
+                        background: COMPOUND_COLORS[cmp] ?? '#888',
+                        flexShrink: 0,
+                        opacity: isEgo ? 1 : 0.85,
+                        boxShadow: isEgo ? `0 0 4px ${COMPOUND_COLORS[cmp] ?? '#888'}66` : 'none',
+                      }}
+                    />
                   </div>
                 ))}
-                {r.pit_history.length === 0 && (
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>no stops</span>
+              </div>
+
+              {/* Pit stop laps */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {pitLaps.length > 0 ? pitLaps.map((label, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 700,
+                      color: isEgo ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                      background: isEgo ? 'rgba(232,0,45,0.12)' : 'var(--color-surface)',
+                      border: `1px solid ${isEgo ? 'rgba(232,0,45,0.3)' : 'var(--color-border)'}`,
+                      padding: '1px 6px',
+                      borderRadius: 3,
+                      letterSpacing: '0.06em',
+                    }}
+                  >
+                    {label}
+                  </span>
+                )) : (
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                    no stops
+                  </span>
                 )}
               </div>
             </div>
@@ -395,17 +492,18 @@ function RivalPanel({ rivals, egoDriver }: { rivals: RivalPrediction[]; egoDrive
 // ── UndercutPanel ──────────────────────────────────────────────────────────
 
 function UndercutPanel({ windows }: { windows: UndercutWindow[] }) {
-  if (windows.length === 0) return null
+  if (windows.length === 0) return (
+    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+      No undercut windows detected
+    </div>
+  )
   return (
     <div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#FFF200', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
-        ⚡ Undercut Windows Detected ({windows.length})
-      </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
         <thead>
           <tr style={{ borderBottom: 'var(--border)' }}>
-            {['Lap', 'Rival', 'Gap', 'Type', 'Rival Tire Age'].map(h => (
-              <th key={h} style={{ textAlign: 'left', padding: '6px 12px', color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            {['Lap', 'Rival', 'Gap', 'Tire Age', 'Type'].map(h => (
+              <th key={h} style={{ textAlign: 'left', padding: '5px 8px', color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
                 {h}
               </th>
             ))}
@@ -418,13 +516,13 @@ function UndercutPanel({ windows }: { windows: UndercutWindow[] }) {
             const typeColor = isTight ? '#FF8C00' : '#FFF200'
             return (
               <tr key={i} style={{ borderBottom: '1px solid var(--color-border)', background: i % 2 === 0 ? 'var(--color-surface-2)' : 'transparent' }}>
-                <td style={{ padding: '8px 12px', color: '#FFF200', fontWeight: 700 }}>L{w.lap}</td>
-                <td style={{ padding: '8px 12px', color: 'var(--color-text)' }}>{w.rival_driver}</td>
-                <td style={{ padding: '8px 12px', color: 'var(--color-text-dim)' }}>{w.gap_s.toFixed(2)}s</td>
-                <td style={{ padding: '8px 12px' }}>
-                  <span style={{ color: typeColor, fontSize: 9, letterSpacing: '0.08em' }}>{typeLabel}</span>
+                <td style={{ padding: '6px 8px', color: '#FFF200', fontWeight: 700 }}>L{w.lap}</td>
+                <td style={{ padding: '6px 8px', color: 'var(--color-text)' }}>{w.rival_driver}</td>
+                <td style={{ padding: '6px 8px', color: 'var(--color-text-dim)' }}>{w.gap_s.toFixed(2)}s</td>
+                <td style={{ padding: '6px 8px', color: 'var(--color-text-dim)' }}>{w.rival_tire_age}L</td>
+                <td style={{ padding: '6px 8px' }}>
+                  <span style={{ color: typeColor, fontSize: 8, letterSpacing: '0.06em' }}>{typeLabel}</span>
                 </td>
-                <td style={{ padding: '8px 12px', color: 'var(--color-text-dim)' }}>{w.rival_tire_age} laps</td>
               </tr>
             )
           })}
@@ -553,127 +651,377 @@ function SimulateModal({
   )
 }
 
-// ── ResultsView ────────────────────────────────────────────────────────────
-
-function ResultsView({
-  result, stints, chartData, gridChartData,
-}: {
-  result: OptimizerResult
-  stints: Stint[]
-  chartData: Array<{ lap: number; time: number; compound: string; tire_age: number; position: number }>
-  gridChartData: Array<Record<string, number>>
-}) {
-  const times = chartData.map(d => d.time)
-  const minT = Math.min(...times)
-  const maxT = Math.max(...times)
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
-
-      {/* Strategy header */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.15em', color: result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-text-muted)', border: `1px solid ${result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-border)'}`, padding: '2px 8px' }}>
-            {result.mode === 'recommend' ? 'PPO OPTIMIZER RECOMMENDATION' : 'USER STRATEGY SIMULATION'}
-          </span>
-          {result.confidence && (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: result.confidence === 'high' ? '#39B54A' : result.confidence === 'medium' ? '#FFF200' : 'var(--color-text-muted)' }}>
-              {result.confidence.toUpperCase()} CONFIDENCE
-            </span>
-          )}
-        </div>
-        {result.strategy_rationale && (
-          <div style={{ fontFamily: 'var(--font-body)', fontSize: 12, fontStyle: 'italic', color: 'var(--color-text-dim)', lineHeight: 1.6, maxWidth: 640 }}>
-            {result.strategy_rationale}
-          </div>
-        )}
-      </div>
-
-      {/* Stat cards */}
-      <div style={{ display: 'flex', gap: 1 }}>
-        <StatCard value={`P${Math.round(result.final_position)}`} label="Predicted Finish" accent={result.final_position <= 3} />
-        <StatCard value={formatRaceTime(result.race_time_s)} label="Race Time" />
-        <StatCard value={result.positions_gained >= 0 ? `+${result.positions_gained}` : String(result.positions_gained)} label="Positions" />
-        <StatCard value={result.pit_stops.length} label="Pit Stops" />
-      </div>
-
-      {/* Pit stop summary */}
-      {result.pit_stops.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {result.pit_stops.map((p, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--color-surface-2)', padding: '5px 10px', border: 'var(--border)' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>L{p.lap}</span>
-              <TireBadge compound={p.compound} size="sm" showLabel={false} />
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: COMPOUND_COLORS[p.compound] }}>{p.compound}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Stint bar */}
-      <div>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>Race Strategy</div>
-        <StintBar stints={stints} totalLaps={result.total_laps} />
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 3 }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>L1</span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>L{result.total_laps}</span>
-        </div>
-      </div>
-
-      {/* Lap time chart */}
-      <div>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>Lap Times</div>
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-            {stints.map((s, i) => (
-              <ReferenceArea key={i} x1={s.startLap} x2={s.endLap} fill={COMPOUND_COLORS[s.compound] ?? '#888'} fillOpacity={0.07} />
-            ))}
-            {result.pit_stops.map(p => (
-              <ReferenceLine key={`pit-${p.lap}`} x={p.lap} stroke="var(--color-text-dim)" strokeDasharray="3 3" strokeWidth={1} />
-            ))}
-            <XAxis dataKey="lap" tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
-            <YAxis domain={[minT - 0.5, maxT + 0.5]} tick={{ fill: 'var(--color-text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }} axisLine={false} tickLine={false} width={44} tickFormatter={(v: number) => v.toFixed(1)} />
-            <Tooltip
-              contentStyle={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)' }}
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              formatter={((value: number, _: string, props: { payload?: { compound?: string; tire_age?: number } }) => [
-                `${value.toFixed(3)}s`,
-                `${props.payload?.compound ?? ''} (age ${props.payload?.tire_age ?? 0})`,
-              ]) as any}
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              labelFormatter={((lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`) as any}
-            />
-            <Line dataKey="time" stroke="var(--color-text)" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: 'var(--color-accent)', stroke: 'none' }} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Grid position tracker */}
-      <GridPositionTracker
-        egoDriver={result.ego_driver}
-        chartData={gridChartData}
-        rivals={result.rival_predictions}
-        pitStops={result.pit_stops}
-      />
-
-      {/* Rival predictions */}
-      <RivalPanel rivals={result.rival_predictions} egoDriver={result.ego_driver} />
-
-      {/* Undercut windows */}
-      <UndercutPanel windows={result.undercut_windows} />
-    </div>
-  )
-}
-
 // ── Placeholder ────────────────────────────────────────────────────────────
 
 function Placeholder() {
   return (
     <div style={{ height: '100%', minHeight: 400, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-      <div style={{ width: 1, height: 80, background: 'linear-gradient(to bottom, transparent, var(--color-border))' }} />
+      <div style={{ width: 1, height: 60, background: 'linear-gradient(to bottom, transparent, var(--color-border))' }} />
       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
         Configure race setup to optimize strategy
       </span>
+    </div>
+  )
+}
+
+// ── AI Insight from rationale ──────────────────────────────────────────────
+
+function generateRationaleInsights(rationale: string | undefined, stints: Stint[], pitStops: Array<{ lap: number; compound: string }>) {
+  const insights: Array<{ icon: 'Target' | 'TrendingUp' | 'Sparkles'; title: string; body: string }> = []
+
+  if (rationale) {
+    insights.push({ icon: 'Sparkles', title: 'Strategy Rationale', body: rationale })
+  }
+
+  if (stints.length > 0) {
+    const stintsWithAvg = stints.map(s => ({ ...s, avgTime: avg(s.laps.map(l => l.lap_time)) }))
+    const bestStint = stintsWithAvg.reduce((best, s) => s.avgTime < best.avgTime ? s : best)
+    insights.push({
+      icon: 'Target',
+      title: `Optimal ${bestStint.compound} Stint`,
+      body: `The ${bestStint.compound.toLowerCase()} stint from L${bestStint.startLap}–L${bestStint.endLap} delivers the best average pace at ${bestStint.avgTime.toFixed(3)}s/lap.`,
+    })
+  }
+
+  if (pitStops.length > 0) {
+    insights.push({
+      icon: 'TrendingUp',
+      title: 'Pit Window',
+      body: `First pit on lap ${pitStops[0].lap} → ${pitStops[0].compound.toLowerCase()} tires.${pitStops.length > 1 ? ` Second on lap ${pitStops[1].lap} → ${pitStops[1].compound.toLowerCase()}.` : ''}`,
+    })
+  }
+
+  return insights
+}
+
+const INSIGHT_ICONS = {
+  Target: <Target size={13} color="var(--color-accent)" />,
+  TrendingUp: <TrendingUp size={13} color="#27F4D2" />,
+  Sparkles: <Sparkles size={13} color="#A78BFA" />,
+}
+
+// ── ResultsView ────────────────────────────────────────────────────────────
+
+type ChartTab = 'laptime' | 'pacedelta'
+
+function ResultsView({
+  result, stints, chartData, gridChartData, referenceResult,
+  circuitSvgPoints, circuitViewBox,
+}: {
+  result: OptimizerResult
+  stints: Stint[]
+  chartData: Array<{ lap: number; time: number; compound: string; tire_age: number; position: number }>
+  gridChartData: Array<Record<string, number>>
+  referenceResult: OptimizerResult | null
+  circuitSvgPoints?: string | null
+  circuitViewBox?: string | null
+}) {
+  const [activeTab, setActiveTab] = useState<ChartTab>('laptime')
+  const [showRef, setShowRef] = useState(false)
+  const [showHint, setShowHint] = useState(false)
+  const hintWrapperRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!showHint) return
+    const handler = (e: MouseEvent) => {
+      if (hintWrapperRef.current && !hintWrapperRef.current.contains(e.target as Node)) {
+        setShowHint(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showHint])
+
+  const times = chartData.map(d => d.time)
+  const minT = Math.min(...times)
+  const maxT = Math.max(...times)
+  const bestLap = Math.min(...times)
+  const deltaData = chartData.map(d => ({ ...d, delta: +(d.time - bestLap).toFixed(3) }))
+
+  const refByLap: Record<number, number> = {}
+  referenceResult?.lap_by_lap.forEach(l => { refByLap[l.lap] = +l.lap_time.toFixed(3) })
+  const mergedChartData = chartData.map(d => ({ ...d, refTime: refByLap[d.lap] ?? null }))
+
+  const positionsGained = result.positions_gained
+  const insights = generateRationaleInsights(result.strategy_rationale, stints, result.pit_stops)
+
+  const hasReference = referenceResult !== null && referenceResult.mode !== result.mode
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* Mode badge + confidence */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.15em', color: result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-text-muted)', border: `1px solid ${result.mode === 'recommend' ? 'var(--color-accent)' : 'var(--color-border)'}`, padding: '2px 8px', borderRadius: 3 }}>
+          {result.mode === 'recommend' ? 'PPO OPTIMIZER RECOMMENDATION' : 'USER STRATEGY SIMULATION'}
+        </span>
+        {result.confidence && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: result.confidence === 'high' ? '#39B54A' : result.confidence === 'medium' ? '#FFF200' : 'var(--color-text-muted)' }}>
+            {result.confidence.toUpperCase()} CONFIDENCE
+          </span>
+        )}
+      </div>
+
+      {/* Stat cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+        {[
+          { value: `P${Math.round(result.final_position)}`, label: 'Predicted Finish', accent: result.final_position <= 3 },
+          { value: formatRaceTime(result.race_time_s), label: 'Race Time', accent: false },
+          { value: positionsGained >= 0 ? `+${positionsGained}` : String(positionsGained), label: 'Positions', accent: false },
+          { value: String(result.pit_stops.length), label: 'Pit Stops', accent: false },
+        ].map(({ value, label, accent }) => (
+          <div
+            key={label}
+            style={{
+              background: accent ? 'linear-gradient(135deg, rgba(232,0,45,0.22) 0%, rgba(232,0,45,0.06) 100%)' : 'var(--color-surface)',
+              border: accent ? '1px solid rgba(232,0,45,0.45)' : 'var(--border)',
+              borderRadius: 'var(--radius-card)',
+              padding: '14px 16px',
+              display: 'flex', flexDirection: 'column', gap: 4,
+            }}
+          >
+            <div style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 900, color: accent ? 'var(--color-accent)' : 'var(--color-text)', lineHeight: 1, letterSpacing: '-0.01em' }}>
+              {value}
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: accent ? 'rgba(232,0,45,0.7)' : 'var(--color-text-muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+              {label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Strategy Timeline */}
+      <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px' }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 10 }}>
+          Strategy Timeline
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 10 }}>
+          {[['SOFT', '#E8002D'], ['MEDIUM', '#FFF200'], ['HARD', '#FFFFFF']].map(([c, col]) => (
+            <div key={c} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: col as string, flexShrink: 0, display: 'inline-block' }} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>{c}</span>
+            </div>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>✦</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>PIT STOP</span>
+          </div>
+        </div>
+        <StintBar stints={stints} totalLaps={result.total_laps} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>LAP 1</span>
+          {result.pit_stops.map(p => (
+            <span key={p.lap} style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-dim)' }}>L{p.lap}</span>
+          ))}
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)' }}>LAP {result.total_laps}</span>
+        </div>
+      </div>
+
+      {/* Tabbed chart */}
+      <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--color-border)' }}>
+            {([
+              { key: 'laptime', label: 'LAP TIME' },
+              { key: 'pacedelta', label: 'PACE DELTA' },
+            ] as { key: ChartTab; label: string }[]).map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                style={{
+                  padding: '6px 14px', background: 'none', border: 'none',
+                  borderBottom: activeTab === tab.key ? '2px solid var(--color-accent)' : '2px solid transparent',
+                  fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em',
+                  color: activeTab === tab.key ? 'var(--color-text)' : 'var(--color-text-muted)',
+                  cursor: 'pointer', marginBottom: -1, borderRadius: 0,
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          {activeTab === 'laptime' && (
+            <div ref={hintWrapperRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => {
+                  if (!hasReference) { setShowHint(h => !h) }
+                  else { setShowHint(false); setShowRef(r => !r) }
+                }}
+                style={{
+                  padding: '5px 12px',
+                  background: showRef && hasReference ? 'rgba(232,0,45,0.08)' : 'transparent',
+                  border: showRef && hasReference ? '1px solid var(--color-accent)' : 'var(--border)',
+                  borderRadius: 'var(--radius-btn)', fontFamily: 'var(--font-mono)', fontSize: 9,
+                  color: !hasReference ? 'var(--color-text-muted)' : showRef ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                  opacity: !hasReference ? 0.5 : 1,
+                  cursor: !hasReference ? 'help' : 'pointer',
+                  letterSpacing: '0.1em',
+                }}
+              >
+                {showRef && hasReference ? 'HIDE REFERENCE ▾' : 'SHOW REFERENCE ▾'}
+              </button>
+              {showHint && (
+                <div style={{
+                  position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 50,
+                  background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                  borderRadius: 0, padding: 12, width: 240,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                }}>
+                  <div style={{
+                    position: 'absolute', top: -5, right: 14,
+                    width: 8, height: 8, background: 'var(--color-surface-2)',
+                    border: '1px solid var(--color-border)', borderRight: 'none', borderBottom: 'none',
+                    transform: 'rotate(45deg)',
+                  }} />
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-accent)', letterSpacing: '0.12em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>⚡</span> HOW TO USE SHOW REFERENCE
+                  </div>
+                  {['1. Click OPTIMIZE STRATEGY to get AI recommendation', '2. Click SIMULATE MY STRATEGY with your own strategy', '3. Toggle SHOW REFERENCE to compare them'].map((step, i) => (
+                    <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-dim)', lineHeight: 1.7 }}>
+                      {step}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* LAP TIME */}
+        {activeTab === 'laptime' && (
+          <ResponsiveContainer width="100%" height={200}>
+            <ComposedChart data={mergedChartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid {...GRID_STYLE} />
+              {stints.map((s, i) => (
+                <ReferenceArea key={i} x1={s.startLap} x2={s.endLap} fill={COMPOUND_COLORS[s.compound] ?? '#888'} fillOpacity={0.07} />
+              ))}
+              {result.pit_stops.map(p => (
+                <ReferenceLine key={`pit-${p.lap}`} x={p.lap} stroke="var(--color-text-dim)" strokeDasharray="3 3" strokeWidth={1} />
+              ))}
+              <XAxis dataKey="lap" tick={AXIS_STYLE} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
+              <YAxis domain={[minT - 0.5, maxT + 0.5]} tick={AXIS_STYLE} axisLine={false} tickLine={false} width={44} tickFormatter={(v: number) => v.toFixed(1)} />
+              <Tooltip
+                contentStyle={TOOLTIP_STYLE}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={((value: number, name: string, props: { payload?: { compound?: string; tire_age?: number; position?: number } }) => {
+                  if (name === 'refTime') return [`${value.toFixed(3)}s`, referenceResult?.mode === 'recommend' ? 'AI Reference' : 'User Reference']
+                  return [`${value.toFixed(3)}s`, `${props.payload?.compound ?? ''} (age ${props.payload?.tire_age ?? 0})`]
+                }) as any}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                labelFormatter={((lap: number) => `Lap ${lap} · P${chartData.find(d => d.lap === lap)?.position ?? '?'}`) as any}
+              />
+              <Line dataKey="time" stroke="var(--color-text)" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: 'var(--color-accent)', stroke: 'none' }} />
+              {showRef && hasReference && (
+                <Line dataKey="refTime" stroke="#555" strokeWidth={1} strokeDasharray="5 3" dot={false} activeDot={{ r: 2, fill: '#555', stroke: 'none' }} connectNulls />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+
+        {/* PACE DELTA */}
+        {activeTab === 'pacedelta' && (
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={deltaData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid {...GRID_STYLE} />
+              <ReferenceLine y={0} stroke="var(--color-text-dim)" strokeWidth={1} />
+              <XAxis dataKey="lap" tick={AXIS_STYLE} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
+              <YAxis tick={AXIS_STYLE} axisLine={false} tickLine={false} width={44} tickFormatter={(v: number) => `+${v.toFixed(0)}s`}
+                label={{ value: 'DELTA TO BEST (s)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-dim)', fontSize: 9, fontFamily: 'var(--font-mono)', dx: -4 }}
+              />
+              <Tooltip
+                content={(props) => {
+                  if (!props.active || !props.payload?.length) return null
+                  const d = props.payload[0]?.payload as { lap: number; delta: number; compound: string; position: number }
+                  return (
+                    <div style={{ ...TOOLTIP_STYLE, padding: '8px 12px' }}>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+                        LAP {d.lap} · P{d.position}
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: COMPOUND_COLORS[d.compound] ?? 'var(--color-text)', letterSpacing: '0.02em' }}>
+                        +{d.delta.toFixed(3)}s
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', marginTop: 3 }}>
+                        vs best lap · {d.compound}
+                      </div>
+                    </div>
+                  )
+                }}
+              />
+              <Bar dataKey="delta" maxBarSize={8}>
+                {deltaData.map((d, i) => (
+                  <Cell key={i} fill={COMPOUND_COLORS[d.compound] ?? '#888'} fillOpacity={0.85} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Bottom row: Grid Position Tracker (left) + Strategy Rationale + Undercut Windows (right) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '60% 40%', gap: 12 }}>
+        {/* Grid Position Tracker */}
+        <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px' }}>
+          <GridPositionTracker
+            egoDriver={result.ego_driver}
+            chartData={gridChartData}
+            rivals={result.rival_predictions}
+            pitStops={result.pit_stops}
+          />
+        </div>
+
+        {/* Right column: Strategy Rationale + Undercut Windows */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* Strategy Rationale */}
+          <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px', flex: '0 0 auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <Sparkles size={12} color="var(--color-accent)" />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+                AI Insight
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {insights.map((ins, i) => (
+                <div key={i} style={{ background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4, padding: '10px 12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 5 }}>
+                    {INSIGHT_ICONS[ins.icon]}
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--color-text)', letterSpacing: '0.05em' }}>
+                      {ins.title}
+                    </span>
+                  </div>
+                  <p style={{ fontFamily: 'var(--font-body)', fontSize: 11, color: 'var(--color-text-dim)', lineHeight: 1.5, margin: 0 }}>
+                    {ins.body}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Undercut Windows */}
+          <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px', flex: 1 }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: result.undercut_windows.length > 0 ? '#FFF200' : 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 10 }}>
+              {result.undercut_windows.length > 0 ? `⚡ UNDERCUT WINDOWS (${result.undercut_windows.length})` : 'UNDERCUT WINDOWS'}
+            </div>
+            <UndercutPanel windows={result.undercut_windows} />
+          </div>
+        </div>
+      </div>
+
+      {/* Race Replay */}
+      {circuitSvgPoints && (
+        <RaceReplay
+          circuitSvgPoints={circuitSvgPoints}
+          circuitViewBox={circuitViewBox ?? '0 0 200 120'}
+          totalLaps={result.total_laps}
+          egoDriver={result.ego_driver}
+          egoLapByLap={result.lap_by_lap}
+          rivalPredictions={result.rival_predictions}
+        />
+      )}
+
+      {/* Rival Predictions — full width */}
+      <div style={{ background: 'var(--color-surface)', border: 'var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px' }}>
+        <RivalPanel rivals={result.rival_predictions} egoDriver={result.ego_driver} />
+      </div>
     </div>
   )
 }
@@ -695,6 +1043,8 @@ export default function Optimizer() {
   const [loadingGrid, setLoadingGrid] = useState(false)
   const [loadingSeason, setLoadingSeason] = useState(false)
   const [result, setResult] = useState<OptimizerResult | null>(null)
+  const [recommendResult, setRecommendResult] = useState<OptimizerResult | null>(null)
+  const [simulateResult, setSimulateResult] = useState<OptimizerResult | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showModal, setShowModal] = useState(false)
@@ -768,14 +1118,11 @@ export default function Optimizer() {
 
   function buildGridParams() {
     let startingGrid = grid.length > 0 ? [...grid] : activeDrivers.map(d => d.code).slice(0, 20)
-    // GridRaceEnv requires exactly 20 drivers — pad from season roster if historical grid is short
     if (startingGrid.length < 20) {
       const extra = activeDrivers.map(d => d.code).filter(c => !startingGrid.includes(c))
       startingGrid = [...startingGrid, ...extra].slice(0, 20)
     }
     startingGrid = startingGrid.slice(0, 20)
-    // Re-seat ego driver at the user-specified position so the grid order matches ego_starting_position.
-    // GridRaceEnv asserts starting_grid[ego_starting_position - 1] === ego_driver.
     const targetIdx = form.startingPosition - 1
     const currentIdx = startingGrid.indexOf(form.driver)
     if (currentIdx !== -1 && currentIdx !== targetIdx && targetIdx >= 0 && targetIdx < startingGrid.length) {
@@ -806,7 +1153,7 @@ export default function Optimizer() {
         starting_grid: startingGrid,
         starting_compounds: startingCompounds,
       })
-      setResult({
+      const r: OptimizerResult = {
         mode: 'recommend',
         ego_driver: res.ego_driver,
         final_position: res.predicted_finish_position,
@@ -819,7 +1166,9 @@ export default function Optimizer() {
         confidence: res.confidence,
         strategy_rationale: res.strategy_rationale,
         total_laps: totalLaps,
-      })
+      }
+      setResult(r)
+      setRecommendResult(r)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Optimizer failed')
     } finally { setIsLoading(false) }
@@ -840,7 +1189,7 @@ export default function Optimizer() {
         starting_compounds: startingCompounds,
         pit_stops: pitStops,
       })
-      setResult({
+      const r: OptimizerResult = {
         mode: 'simulate',
         ego_driver: res.ego_driver,
         final_position: res.ego_predicted_position,
@@ -851,7 +1200,9 @@ export default function Optimizer() {
         rival_predictions: res.rival_predictions,
         undercut_windows: res.undercut_windows_identified,
         total_laps: totalLaps,
-      })
+      }
+      setResult(r)
+      setSimulateResult(r)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Simulation failed')
     } finally { setIsLoading(false) }
@@ -866,37 +1217,52 @@ export default function Optimizer() {
     ? buildGridChartData(result.ego_driver, result.lap_by_lap, result.rival_predictions, result.total_laps)
     : []
 
+  // Reference result is the "other" mode's result for comparison
+  const referenceResult = result?.mode === 'simulate' ? recommendResult : simulateResult
+
   return (
     <div style={{ minHeight: '100vh', background: 'var(--color-bg)', display: 'flex', flexDirection: 'column' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {/* Nav */}
-      <nav style={{ display: 'flex', alignItems: 'center', gap: 32, padding: '16px 32px', borderBottom: 'var(--border)', background: 'var(--color-surface)', flexShrink: 0 }}>
+      <nav style={{ display: 'flex', alignItems: 'center', padding: '14px 28px', borderBottom: 'var(--border)', background: 'var(--color-surface)', flexShrink: 0, gap: 16 }}>
         <button onClick={() => navigate('/')} style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 900, letterSpacing: '0.1em', color: 'var(--color-text)', background: 'none', border: 'none', cursor: 'pointer' }}>
           PIT<span style={{ color: 'var(--color-accent)' }}>IQ</span>
         </button>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-dim)', letterSpacing: '0.15em' }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.18em', textTransform: 'uppercase' }}>
           OPTIMIZER MODE
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 20 }}>
-          <button onClick={() => navigate('/sandbox')} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
-            SANDBOX →
-          </button>
-          <button onClick={() => navigate('/historical')} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
-            HISTORICAL →
-          </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 24 }}>
+          {[{ label: 'SANDBOX', path: '/sandbox' }, { label: 'HISTORICAL', path: '/historical' }].map(({ label, path }) => (
+            <button
+              key={path}
+              onClick={() => navigate(path)}
+              onMouseEnter={e => {
+                const el = e.currentTarget as HTMLElement
+                el.style.color = '#FFFFFF'
+                el.style.textShadow = '0 0 8px rgba(255,255,255,0.8), 0 0 20px rgba(255,255,255,0.4)'
+              }}
+              onMouseLeave={e => {
+                const el = e.currentTarget as HTMLElement
+                el.style.color = 'var(--color-text-muted)'
+                el.style.textShadow = 'none'
+              }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em', transition: 'color 0.15s, text-shadow 0.15s' }}
+            >
+              {label} →
+            </button>
+          ))}
         </div>
       </nav>
 
       {/* Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Left panel — 35% */}
-        <div style={{ width: '35%', flexShrink: 0, borderRight: 'var(--border)', overflowY: 'auto', padding: 28, display: 'flex', flexDirection: 'column', gap: 28 }}>
+        {/* Left panel — 38% */}
+        <div style={{ width: '38%', flexShrink: 0, borderRight: 'var(--border)', overflowY: 'auto', padding: '20px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-          {/* Step 1 */}
-          <div>
-            <SectionLabel n={1} label="Race Selection" />
+          {/* Section 01 — Race Selection */}
+          <SectionCard number="01" title="Race Selection">
             <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
                 <FieldLabel>Circuit</FieldLabel>
@@ -909,35 +1275,44 @@ export default function Optimizer() {
                   {activeCircuits.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
                 </StyledSelect>
               </div>
-              <div style={{ width: 90 }}>
+              <div style={{ width: 80 }}>
                 <FieldLabel>Year</FieldLabel>
                 <StyledSelect value={form.year} onChange={e => { void handleYearChange(Number(e.target.value)) }}>
                   {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
                 </StyledSelect>
               </div>
             </div>
+
             {circuitInfo && (
               <>
-                <div style={{ background: 'var(--color-surface-2)', padding: '10px 12px', display: 'flex', gap: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0, background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4, padding: '10px 12px' }}>
+                  <MapPin size={13} color="var(--color-accent)" style={{ flexShrink: 0, marginRight: 10 }} />
                   {[
-                    { label: 'Length', value: `${circuitInfo.length_km} km` },
-                    { label: 'Laps', value: circuitInfo.total_laps_typical },
-                    { label: 'Type', value: circuitInfo.circuit_type },
-                  ].map(m => (
-                    <div key={m.label}>
-                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{m.label}</div>
-                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text)', fontWeight: 600 }}>{m.value}</div>
+                    { label: 'Circuit Length', value: `${circuitInfo.length_km} km` },
+                    { label: 'Laps', value: String(circuitInfo.total_laps_typical) },
+                    { label: 'Track Type', value: circuitInfo.circuit_type },
+                  ].map((m, i) => (
+                    <div key={m.label} style={{ display: 'flex', alignItems: 'stretch', flex: 1 }}>
+                      {i > 0 && <div style={{ width: 1, background: 'var(--color-border)', marginRight: 12, alignSelf: 'stretch' }} />}
+                      <div>
+                        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 2 }}>{m.label}</div>
+                        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text)', fontWeight: 600, textTransform: 'capitalize' }}>{m.value}</div>
+                      </div>
                     </div>
                   ))}
                 </div>
                 {circuitInfo.svg_points && (
-                  <div style={{ background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4, padding: '10px 12px' }}>
+                  <div style={{ background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4, padding: '10px 12px', marginTop: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end', marginBottom: 3 }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--color-text-muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                        Click to magnify
+                      </span>
+                    </div>
                     <CircuitMap
                       svgPoints={circuitInfo.svg_points}
                       viewBox={circuitInfo.viewBox ?? '0 0 200 120'}
                       width="100%"
                       height={100}
-                      color="#27F4D2"
                       animated
                       circuitInfo={{
                         name: circuitInfo.name,
@@ -951,11 +1326,10 @@ export default function Optimizer() {
                 )}
               </>
             )}
-          </div>
+          </SectionCard>
 
-          {/* Step 2 */}
-          <div>
-            <SectionLabel n={2} label="Ego Driver" />
+          {/* Section 02 — Driver Setup */}
+          <SectionCard number="02" title="Driver Setup">
             <div style={{ display: 'flex', gap: 8 }}>
               <div style={{ flex: 1 }}>
                 <FieldLabel>Driver</FieldLabel>
@@ -970,65 +1344,73 @@ export default function Optimizer() {
                 {form.driver && (
                   <button
                     onClick={() => setShowStylePanel(true)}
-                    style={{ marginTop: 5, background: 'none', border: 'none', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em', color: 'var(--color-accent)', cursor: 'pointer', textTransform: 'uppercase' }}
+                    style={{
+                      marginTop: 6, display: 'inline-flex', alignItems: 'center', gap: 5,
+                      padding: '4px 10px',
+                      background: 'rgba(232,0,45,0.08)',
+                      border: '1px solid rgba(232,0,45,0.5)',
+                      borderRadius: 'var(--radius-btn)',
+                      fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.12em',
+                      color: 'var(--color-accent)', cursor: 'pointer', textTransform: 'uppercase',
+                      animation: 'style-pulse 2.5s ease-in-out infinite',
+                    }}
                   >
-                    View Style →
+                    <span style={{ fontSize: 10 }}>◈</span> View Driver Style
                   </button>
                 )}
               </div>
-              <div style={{ width: 80 }}>
+              <div style={{ width: 72 }}>
                 <FieldLabel>Grid Pos</FieldLabel>
                 <input
                   type="number" min={1} max={20} value={form.startingPosition}
                   onChange={e => setForm(prev => ({ ...prev, startingPosition: Math.max(1, Math.min(20, Number(e.target.value))) }))}
-                  style={{ width: '100%', padding: '8px 10px', background: 'var(--color-surface-2)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none' }}
+                  style={{ width: '100%', padding: '8px 8px', background: 'var(--color-surface-2)', border: 'var(--border)', color: 'var(--color-text)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none', borderRadius: 4 }}
                 />
               </div>
             </div>
             {loadingGrid && (
               <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>Loading grid…</div>
             )}
-          </div>
+          </SectionCard>
 
-          {/* Step 3 */}
-          <div>
-            <SectionLabel n={3} label="Starting Compound" />
+          {/* Section 03 — Starting Compound */}
+          <SectionCard number="03" title="Starting Compound">
             <CompoundButtons value={form.startingCompound} onChange={c => setForm(prev => ({ ...prev, startingCompound: c }))} />
-          </div>
+          </SectionCard>
 
-          {/* Actions */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Action buttons */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
             <button
               onClick={() => void handleRecommend()}
               disabled={!canSubmit || isLoading}
-              style={{ padding: '12px', background: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-surface-2)', border: 'none', color: '#fff', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed', transition: 'background 0.1s' }}
+              style={{ height: 48, background: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-surface-2)', border: 'none', color: '#fff', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 'var(--radius-btn)' }}
             >
-              OPTIMIZE STRATEGY
+              <Flag size={15} /> OPTIMIZE STRATEGY
             </button>
             <button
               onClick={() => setShowModal(true)}
               disabled={!canSubmit || isLoading}
-              style={{ padding: '12px', background: 'none', border: canSubmit && !isLoading ? '1px solid var(--color-accent)' : 'var(--border)', color: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed' }}
+              style={{ height: 48, background: 'transparent', border: canSubmit && !isLoading ? '1px solid var(--color-accent)' : 'var(--border)', color: canSubmit && !isLoading ? 'var(--color-accent)' : 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.15em', cursor: canSubmit && !isLoading ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 'var(--radius-btn)' }}
             >
               SIMULATE MY STRATEGY
             </button>
             {error && (
-              <div style={{ padding: '8px 10px', background: 'rgba(232,0,45,0.08)', border: '1px solid rgba(232,0,45,0.3)', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-accent)', letterSpacing: '0.05em' }}>
+              <div style={{ padding: '8px 10px', background: 'rgba(232,0,45,0.08)', border: '1px solid rgba(232,0,45,0.3)', borderRadius: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-accent)', letterSpacing: '0.05em' }}>
                 {error}
               </div>
             )}
           </div>
 
-          {/* Info */}
-          <div style={{ padding: '10px 12px', background: 'var(--color-surface-2)', border: 'var(--border)' }}>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.1em', lineHeight: 1.7 }}>
-              Full 20-car simulation. Rivals modeled with behavior-cloned style policies. Undercut &amp; overcut windows detected automatically.
+          {/* Info note */}
+          <div style={{ padding: '10px 12px', background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4 }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.06em', lineHeight: 1.7 }}>
+              Full 20-car grid simulation. Rivals modeled with behavior-cloned style policies. Undercut &amp; overcut windows detected automatically.
             </div>
           </div>
         </div>
 
-        {/* Right panel — 65% */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 28 }}>
+        {/* Right panel — 62% */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
           {isLoading ? (
             <div style={{ height: '100%', minHeight: 400, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
               <div style={{ width: 36, height: 36, border: '2px solid var(--color-border)', borderTopColor: 'var(--color-accent)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
@@ -1037,7 +1419,15 @@ export default function Optimizer() {
               </span>
             </div>
           ) : result ? (
-            <ResultsView result={result} stints={stints} chartData={chartData} gridChartData={gridChartData} />
+            <ResultsView
+              result={result}
+              stints={stints}
+              chartData={chartData}
+              gridChartData={gridChartData}
+              referenceResult={referenceResult ?? null}
+              circuitSvgPoints={circuitInfo?.svg_points ?? null}
+              circuitViewBox={circuitInfo?.viewBox ?? null}
+            />
           ) : (
             <Placeholder />
           )}

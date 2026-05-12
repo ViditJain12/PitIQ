@@ -556,6 +556,7 @@ def _run_grid_recommend_sync(
     lap_num = 1
     terminated = truncated = False
     info: dict = {}
+    _prev_compound = starting_compound  # track actual compound to detect real pits
 
     while not (terminated or truncated):
         action, _ = ppo_model.predict(obs, deterministic=True)
@@ -571,9 +572,22 @@ def _run_grid_recommend_sync(
             "lap_time": round(float(info["ego_lap_time"]), 3),
             "position": int(info["ego_position"]),
         })
-        if action != 0:
-            recommended_strategy.append({"lap": lap_num, "compound": _GRID_ACTION_COMPOUND[action]})
+        # Detect pit by actual compound change, not raw action (env may override same-compound pits)
+        if info["ego_compound"] != _prev_compound:
+            recommended_strategy.append({"lap": lap_num, "compound": info["ego_compound"]})
+        _prev_compound = info["ego_compound"]
         lap_num += 1
+
+    # Enforce minimum stint length (5 laps) and cap at 4 stops to guard against degenerate PPO behaviour
+    _MIN_STINT = 5
+    filtered: list[dict] = []
+    for stop in recommended_strategy:
+        last_lap = filtered[-1]["lap"] if filtered else 0
+        if stop["lap"] - last_lap >= _MIN_STINT:
+            filtered.append(stop)
+        if len(filtered) == 4:
+            break
+    recommended_strategy = filtered
 
     ego_car = env._ego
     rival_preds = _rival_predictions_from_grid(env._grid, ego_driver, styles_df)

@@ -22,6 +22,7 @@ import type { LapData, PitStop, SimulateResponse, PPORecommendResponse } from '.
 import TireBadge from '../components/TireBadge'
 import LoadingState from '../components/LoadingState'
 import DriverStylePanel from '../components/DriverStylePanel'
+import RaceReplay from '../components/RaceReplay'
 
 // ── constants ──────────────────────────────────────────────────────────────
 
@@ -409,7 +410,21 @@ export default function Sandbox() {
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 24 }}>
           {[{ label: 'OPTIMIZER', path: '/optimizer' }, { label: 'HISTORICAL', path: '/historical' }].map(({ label, path }) => (
-            <button key={path} onClick={() => navigate(path)} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em' }}>
+            <button
+              key={path}
+              onClick={() => navigate(path)}
+              onMouseEnter={e => {
+                const el = e.currentTarget as HTMLElement
+                el.style.color = '#FFFFFF'
+                el.style.textShadow = '0 0 8px rgba(255,255,255,0.8), 0 0 20px rgba(255,255,255,0.4)'
+              }}
+              onMouseLeave={e => {
+                const el = e.currentTarget as HTMLElement
+                el.style.color = 'var(--color-text-muted)'
+                el.style.textShadow = 'none'
+              }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', background: 'none', border: 'none', cursor: 'pointer', letterSpacing: '0.12em', transition: 'color 0.15s, text-shadow 0.15s' }}
+            >
               {label} →
             </button>
           ))}
@@ -600,6 +615,13 @@ export default function Sandbox() {
             )}
           </div>
 
+          {/* Info note */}
+          <div style={{ padding: '10px 12px', background: 'var(--color-surface-2)', border: 'var(--border)', borderRadius: 4 }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', letterSpacing: '0.06em', lineHeight: 1.7 }}>
+              Single-car simulation. Rivals modeled as a static pace reference. For full 20-car grid dynamics and undercut windows, use Optimizer mode.
+            </div>
+          </div>
+
         </div>
 
         {/* ── Right panel (62%) ──────────────────────────────────────── */}
@@ -620,6 +642,9 @@ export default function Sandbox() {
               ppoNote={result.ppo_note}
               positionCapped={result.position_capped}
               ppoResult={result.mode === 'simulate' ? ppoResult : null}
+              egoDriver={form.driver}
+              circuitSvgPoints={circuitInfo?.svg_points ?? null}
+              circuitViewBox={circuitInfo?.viewBox ?? null}
             />
           ) : (
             <Placeholder />
@@ -717,7 +742,7 @@ const INSIGHT_ICONS = {
 
 // ── ResultView ─────────────────────────────────────────────────────────────
 
-type ChartTab = 'laptime' | 'tirewear' | 'position' | 'pacedelta'
+type ChartTab = 'laptime' | 'tirewear' | 'pacedelta'
 
 const CLIFF_LAPS: Record<string, number> = { SOFT: 18, MEDIUM: 32, HARD: 45 }
 const CLIFF_COLORS: Record<string, string> = { SOFT: '#E8002D', MEDIUM: '#FFF200', HARD: '#888888' }
@@ -730,6 +755,7 @@ const TOOLTIP_STYLE = { background: 'var(--color-surface)', border: '1px solid v
 function ResultView({
   result, stints, chartData, startingPosition, positionsGained, totalLaps, mode,
   confidence, strategyOverridden, ppoNote, positionCapped, ppoResult,
+  egoDriver, circuitSvgPoints, circuitViewBox,
 }: {
   result: SandboxResult
   stints: Stint[]
@@ -743,6 +769,9 @@ function ResultView({
   ppoNote?: string
   positionCapped?: boolean
   ppoResult?: SandboxResult | null
+  egoDriver: string
+  circuitSvgPoints?: string | null
+  circuitViewBox?: string | null
 }) {
   const [activeTab, setActiveTab] = useState<ChartTab>('laptime')
   const [showRef, setShowRef] = useState(false)
@@ -866,7 +895,6 @@ function ResultView({
             {([
               { key: 'laptime', label: 'LAP TIME' },
               { key: 'tirewear', label: 'TIRE WEAR' },
-              { key: 'position', label: 'POSITION TRACE' },
               { key: 'pacedelta', label: 'PACE DELTA' },
             ] as { key: ChartTab; label: string }[]).map(tab => (
               <button
@@ -1004,36 +1032,6 @@ function ResultView({
           </ResponsiveContainer>
         )}
 
-        {/* ── POSITION TRACE ───────────────────────────────────────────── */}
-        {activeTab === 'position' && (
-          <ResponsiveContainer width="100%" height={200}>
-            <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid {...GRID_STYLE} />
-              <ReferenceLine y={startingPosition} stroke="#444" strokeDasharray="4 2" strokeWidth={1}
-                label={{ value: 'START', position: 'insideTopRight', fill: '#666', fontSize: 8, fontFamily: 'var(--font-mono)' }}
-              />
-              {result.pit_stops.map(p => (
-                <ReferenceLine key={`pit-${p.lap}`} x={p.lap} stroke="var(--color-text-dim)" strokeDasharray="3 3" strokeWidth={1} />
-              ))}
-              <XAxis dataKey="lap" tick={AXIS_STYLE} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
-              <YAxis
-                domain={[20, 1]} reversed ticks={[1, 5, 10, 15, 20]}
-                tick={AXIS_STYLE} axisLine={false} tickLine={false} width={36}
-                tickFormatter={(v: number) => `P${v}`}
-                label={{ value: 'POSITION', angle: -90, position: 'insideLeft', fill: 'var(--color-text-dim)', fontSize: 9, fontFamily: 'var(--font-mono)', dx: -4 }}
-              />
-              <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={((value: number) => [`P${value}`, 'Position']) as any}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={((lap: number) => `Lap ${lap}`) as any}
-              />
-              <Line dataKey="position" stroke="var(--color-accent)" strokeWidth={2} dot={false} activeDot={{ r: 3, fill: 'var(--color-accent)', stroke: 'none' }} />
-            </ComposedChart>
-          </ResponsiveContainer>
-        )}
-
         {/* ── PACE DELTA ───────────────────────────────────────────────── */}
         {activeTab === 'pacedelta' && (
           <ResponsiveContainer width="100%" height={200}>
@@ -1045,11 +1043,23 @@ function ResultView({
                 label={{ value: 'DELTA TO BEST (s)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-dim)', fontSize: 9, fontFamily: 'var(--font-mono)', dx: -4 }}
               />
               <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={((value: number, _: string, props: { payload?: { compound?: string } }) => [`+${value.toFixed(3)}s vs best`, props.payload?.compound ?? '']) as any}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={((lap: number) => `Lap ${lap}`) as any}
+                content={(props) => {
+                  if (!props.active || !props.payload?.length) return null
+                  const d = props.payload[0]?.payload as { lap: number; delta: number; compound: string; position: number }
+                  return (
+                    <div style={{ ...TOOLTIP_STYLE, padding: '8px 12px' }}>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+                        LAP {d.lap} · P{d.position}
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: COMPOUND_COLORS[d.compound] ?? 'var(--color-text)', letterSpacing: '0.02em' }}>
+                        +{d.delta.toFixed(3)}s
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--color-text-muted)', marginTop: 3 }}>
+                        vs best lap · {d.compound}
+                      </div>
+                    </div>
+                  )
+                }}
               />
               <Bar dataKey="delta" maxBarSize={8}>
                 {deltaData.map((d, i) => (
@@ -1096,6 +1106,18 @@ function ResultView({
           </div>
         </div>
       </div>
+
+      {/* Race Replay */}
+      {circuitSvgPoints && (
+        <RaceReplay
+          circuitSvgPoints={circuitSvgPoints}
+          circuitViewBox={circuitViewBox ?? '0 0 200 120'}
+          totalLaps={totalLaps}
+          egoDriver={egoDriver}
+          egoLapByLap={result.lap_by_lap}
+          rivalPredictions={[]}
+        />
+      )}
     </div>
   )
 }

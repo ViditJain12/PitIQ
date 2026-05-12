@@ -971,3 +971,58 @@ Initial training attempt ran at 7 fps (518s for first rollout of 4096 steps). Ro
 - Circuit name matching: `KNOWN_INCIDENTS` and `CHAOTIC_RACE_NOTES` keys must match the circuit string returned by the API (e.g. `"Austrian Grand Prix"` not `"Austria"`). Verified against `/api/circuits` response.
 
 **Open:** Phase 10 — Polish + deploy.
+
+---
+
+## Phase 9.2 — UI Polish + Race Replay (2026-05-11)
+
+**Goal:** Redesign Optimizer and Historical mode UIs to match design mocks, fix a critical PPO pit-stop bug, and build a Race Replay animation feature for both Sandbox and Optimizer.
+
+**What was built:**
+
+**Optimizer UI redesign:**
+- Left panel converted to `SectionCard` pattern (numbered sections with red left border) matching Sandbox.
+- Circuit map gets "Click to magnify" label; View Driver Style uses pulsing red badge.
+- Right panel: tabbed charts reduced to LAP TIME + PACE DELTA (POSITION TRACE removed — redundant with Grid Position Tracker).
+- SHOW REFERENCE button: stores `recommendResult` and `simulateResult` separately; toggles dashed grey overlay line on the lap time chart for AI vs user strategy comparison. Tooltip (popover with caret) explains the workflow when no reference exists.
+- Bottom 2-column grid: Grid Position Tracker (60%) alongside AI Insight + Undercut Windows (40%).
+- Rival Predictions redesigned: POS | Driver code | compound circles (colored dots + arrow separators) | pit lap badges (L15, L40, etc.).
+
+**PPO optimizer pit-stop bug (critical fix):**
+- Agent was recommending 12–19 pit stops per race. Root cause: `GridRaceEnv` only blocks pitting to the *same* compound, so PPO exploited SOFT→MEDIUM→SOFT→MEDIUM alternation every lap. Old code recorded `action != 0` as a pit stop.
+- Fix in `_run_grid_recommend_sync`: detect compound changes via `info["ego_compound"] != _prev_compound`, enforce a `_MIN_STINT = 5` lap minimum between stops, cap at 4 total stops. Result: 1–2 stops per race.
+
+**Historical UI redesign:**
+- Switched from full-width centered layout to 38/62 two-panel layout.
+- Left panel: SectionCard "01 SELECT RACE", RUN VALIDATION button, `AccuracyStat` cards (circular ring indicator), `LargeDeltaCallout` (threshold lowered from >5 to >3), About box.
+- Right panel: results table.
+
+**Global polish:**
+- `--color-text-dim`: #888888 → #AAAAAA; `--color-text-muted`: #444444 → #777777 — better contrast on dark backgrounds.
+- Nav button white glow hover (`text-shadow: 0 0 8px rgba(255,255,255,0.8)`) added to all three pages.
+- Sandbox left panel: info note "Single-car simulation. Rivals modeled as a static pace reference. For full 20-car grid dynamics and undercut windows, use Optimizer mode."
+- Pace delta bar chart: replaced Recharts `formatter`/`labelFormatter` with custom `content` renderer to show the delta value reliably.
+
+**Race Replay (`src/components/RaceReplay.tsx`):**
+- New component integrated below Stint Summary/AI Insight in Sandbox and between Grid Position Tracker and Rival Predictions in Optimizer.
+- Collapsible panel toggled by header button. Only renders when `circuitInfo.svg_points` is available.
+- `polylineToPath()`: converts space-separated SVG polyline points to `<path d="M... L... L[close]">` for `SVGPathElement.getPointAtLength()`.
+- Dot sizes (ego radius = 2.2% viewBox width, rival = 1.3%) scale dynamically from `circuitViewBox` — consistent across circuits with different coordinate ranges.
+- **Performance:** RAF loop updates all dot `cx`/`cy` via direct `setAttribute` (bypasses React reconciler). React state (`currentLap`, `standings`, `scrubPct`) updated at throttled intervals: standings every 0.5s race-time, scrubber every 100ms real-time.
+- **Ego timing:** exact — binary interpolation through `egoCumTimesRef` (cumulative sum of `lap_by_lap.lap_time`).
+- **Rival timing:** estimated — ego total race time ± (position gap × 1.5s). Pit visualization: +6x/+4y SVG offset + 40% opacity for first 12% of a pit lap.
+- **Countdown:** 3→2→1→GO! (real-time seconds) before animation starts. GO! shown 700ms then dismissed.
+- **Controls:** Play/Replay, Pause, 1×/5×/10×/30× speed (default 10×), scrubber seek (calls `jumpToTime` → repositions all dots without React re-render), LAP X/Y counter.
+- **Live standings** (35% width, rivals-only): sorted by circuit progress (fracLaps), updated every 0.5s race-time.
+- Sandbox: passes `rivalPredictions={[]}` → no standings panel, SVG takes full width, single ego dot trace.
+
+**Worked well:**
+- Direct SVG `setAttribute` pattern: React doesn't overwrite manually-set attributes between renders when the JSX value is unchanged (always `cx={-9999}`). This lets 60fps animation coexist with React state updates cleanly.
+- Separate `recommendResult` / `simulateResult` state in Optimizer for SHOW REFERENCE: comparing the two modes is a common user workflow, and the "other mode's result" as reference is intuitive.
+- `_MIN_STINT = 5` filter in the PPO output post-processor: simple heuristic that catches all agent exploits without modifying the RL environment.
+
+**Pain points:**
+- `useCallback` + inline helper functions: `animate` uses `useCallback([totalLaps])` and calls helper logic directly inline to avoid stale closure issues with non-memoized inner functions.
+- Dot radius scaling: SVG `r` is in viewBox coordinate units. Hard-coded pixel sizes don't scale across circuits. Solved with `vbW * 0.022` (ego) and `vbW * 0.013` (rival) as proportional radii.
+
+**Open:** Phase 10 — Dockerization + deployment.

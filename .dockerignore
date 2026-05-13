@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Data (too large — mounted as volumes)
+data/raw/
+data/processed/
+data/backfill.log
+fastf1_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Notebooks
+notebooks/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docs (not needed in container)
+docs/

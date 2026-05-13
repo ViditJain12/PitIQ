@@ -210,12 +210,6 @@ async def startup() -> None:
     # XGBoost model — warms lru_cache; circuit_defaults used for weather fallback
     _, _, _, xgb_circuit_defaults = load_model()
 
-    # PPO Sandbox agent
-    ppo_sandbox = PPO.load(_MODELS_DIR / "ppo_sandbox_best.zip")
-
-    # PPO Grid agent (Optimizer Mode)
-    ppo_grid = PPO.load(_MODELS_DIR / "ppo_grid_best.zip")
-
     # Thread pool for synchronous env execution in async handlers
     executor = ThreadPoolExecutor(max_workers=4)
 
@@ -225,9 +219,24 @@ async def startup() -> None:
     app.state.cluster_map          = cluster_map
     app.state.circuit_maps         = circuit_maps
     app.state.xgb_circuit_defaults = xgb_circuit_defaults
-    app.state.ppo_sandbox          = ppo_sandbox
-    app.state.ppo_grid             = ppo_grid
+    # PPO agents lazy-loaded on first request to keep startup fast and RAM low
+    app.state.ppo_sandbox          = None
+    app.state.ppo_grid             = None
     app.state.executor             = executor
+
+
+# ── Lazy PPO loaders ──────────────────────────────────────────────────────────
+
+def get_sandbox_agent() -> PPO:
+    if app.state.ppo_sandbox is None:
+        app.state.ppo_sandbox = PPO.load(_MODELS_DIR / "ppo_sandbox_best.zip")
+    return app.state.ppo_sandbox
+
+
+def get_grid_agent() -> PPO:
+    if app.state.ppo_grid is None:
+        app.state.ppo_grid = PPO.load(_MODELS_DIR / "ppo_grid_best.zip")
+    return app.state.ppo_grid
 
 
 # Shut down the thread pool executor gracefully on app shutdown.
@@ -1038,7 +1047,7 @@ async def sandbox_recommend(req: PPORecommendRequest) -> PPORecommendResponse:
     circuit    = _find_circuit(req.circuit)
     total_laps = req.total_laps or _TOTAL_LAPS_TYPICAL.get(circuit, 57)
     year       = req.year or 2024
-    ppo_model  = app.state.ppo_sandbox
+    ppo_model  = get_sandbox_agent()
 
     loop   = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -1109,7 +1118,7 @@ async def simulate_grid(req: GridSimulateRequest) -> GridSimulateResponse:
 @app.post("/api/optimizer/recommend", response_model=OptimizerRecommendResponse)
 async def recommend_optimizer(req: OptimizerRecommendRequest) -> OptimizerRecommendResponse:
     circuit   = _find_circuit(req.circuit)
-    ppo_model = app.state.ppo_grid
+    ppo_model = get_grid_agent()
     styles_df = app.state.driver_styles
     driver_up = req.ego_driver.upper()
 

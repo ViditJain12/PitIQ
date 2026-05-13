@@ -753,7 +753,7 @@ const GRID_STYLE = { stroke: 'var(--color-border)', strokeOpacity: 0.3 }
 const TOOLTIP_STYLE = { background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text)' }
 
 function ResultView({
-  result, stints, chartData, startingPosition, positionsGained, totalLaps, mode,
+  result, stints, chartData, startingPosition: _startingPosition, positionsGained, totalLaps, mode,
   confidence, strategyOverridden, ppoNote, positionCapped, ppoResult,
   egoDriver, circuitSvgPoints, circuitViewBox,
 }: {

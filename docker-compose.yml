@@ -1,19 +1,38 @@
-version: "3.9"
-
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: pitiq-backend
+    restart: always
     ports:
       - "8000:8000"
     volumes:
-      - ./models:/app/models
-      - ./data:/app/data
+      # data/features and models are large — mounted, not baked into image
+      - ./data/features:/pitiq/data/features:ro
+      - ./models:/pitiq/models:ro
     environment:
-      - PITIQ_ENV=production
+      # Allow requests from the nginx frontend container
+      - CORS_ORIGINS=http://localhost,http://localhost:80
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   frontend:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: pitiq-frontend
+    restart: always
     ports:
-      - "5173:80"
+      - "80:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+networks:
+  default:
+    name: pitiq-network

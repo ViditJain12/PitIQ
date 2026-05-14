@@ -15,7 +15,7 @@ import type {
   HistoricalValidationResponse,
 } from './types'
 
-const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
+const BASE_URL = import.meta.env.VITE_API_URL ?? ""
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`)

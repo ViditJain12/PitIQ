@@ -34,4 +34,22 @@ The goal is not to perfectly recreate every bit of F1 chaos. The goal is to make
 
 ---
 
-Currently working on deployment.
+## Running Locally
+
+**Requirements:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+```bash
+# Clone the repo
+git clone ...
+cd PitIQ
+
+# Start the full stack (backend + frontend)
+docker compose up --build
+```
+
+Open [http://localhost](http://localhost) in your browser.
+
+To stop:
+```bash
+docker compose down
+```
